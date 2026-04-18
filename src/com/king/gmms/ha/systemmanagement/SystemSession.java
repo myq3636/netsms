@@ -128,7 +128,7 @@ public class SystemSession implements Receiver, SystemMessageBufferListener {
 		responseWaitTime = Long.parseLong(moduleManager.getClusterProperty(
 				"SystemManager.ResponseWaitTimeOut", "300000"));
 		int windowsSize = Integer.parseInt(moduleManager.getClusterProperty(
-				"SystemManager.BufferSize", "50000"));
+				"SystemManager.BufferSize", "2000"));
 		registerTimePeriod = Integer.parseInt(moduleManager.getClusterProperty("SystemManager.RegisterTimePeriod", "300"));
 		bufferMonitor = new SystemMessageBuffer(sessionName, windowsSize);
 		responseBuffer = new ConcurrentHashMap<Integer, SystemPdu>();
@@ -172,7 +172,7 @@ public class SystemSession implements Receiver, SystemMessageBufferListener {
 		responseWaitTime = Long.parseLong(moduleManager.getClusterProperty(
 				"SystemManager.ResponseWaitTimeOut", "300000"));
 		int windowsSize = Integer.parseInt(moduleManager.getClusterProperty(
-				"SystemManager.BufferSize", "50000"));
+				"SystemManager.BufferSize", "2000"));
 		registerTimePeriod = Integer.parseInt(moduleManager.getClusterProperty("SystemManager.RegisterTimePeriod", "300"));
 		bufferMonitor = new SystemMessageBuffer(sessionName, windowsSize);
 		responseBuffer = new ConcurrentHashMap<Integer, SystemPdu>();

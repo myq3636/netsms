@@ -21,8 +21,9 @@ import com.king.message.gmms.GmmsMessage;
  * <p>Company: </p>
  *
  * @author not attributable
- * @version 1.0
+ * @deprecated Phase 2 refactoring: Local memory queues are deprecated in favor of Redis Stream event-driven architecture.
  */
+@Deprecated
 public abstract class CustomerMessageQueue implements OperatorMessageQueue,QueueTimeoutInterface {
 	
 	protected A2PCustomerInfo cst = null;

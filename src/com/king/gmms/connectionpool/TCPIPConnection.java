@@ -21,6 +21,7 @@ import java.net.Socket;
 import java.net.SocketException;
 import java.nio.ByteBuffer;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -42,9 +43,12 @@ public class TCPIPConnection {
 	protected long sendingInterval;
 	protected long maxSilentTime;
 	protected volatile boolean closed;
-	protected volatile boolean async;
-	protected final Object mutex;// Used for lock during sendAndReceive duration
-	protected String connectionname;
+	private volatile boolean async;
+	private final Object mutex;// Used for lock during sendAndReceive duration
+	private String connectionname;
+	private final ConcurrentLinkedQueue<byte[]> sendQueue;
+	private final Object sendMutex;
+	private TCPSender tcpSender;
 
 	public TCPIPConnection(Socket socket) {
 		if (socket == null) {
@@ -53,6 +57,8 @@ public class TCPIPConnection {
 		closed = true;
 		async = true;
 		mutex = new Object();
+		sendMutex = new Object();
+		sendQueue = new ConcurrentLinkedQueue<byte[]>();
 		this.socket = socket;
 		setSoTimeout(1, SECONDS);
 		setEventInterval(20, MILLISECONDS);
@@ -69,11 +75,13 @@ public class TCPIPConnection {
 		socket.setTcpNoDelay(true);
 		os = new BufferedOutputStream(socket.getOutputStream());
 		is = new BufferedInputStream(socket.getInputStream(),readBufferSize);
-		tcpReceiver = new TCPReceiver("TCPReceiver_" + connectionname);
+		tcpReceiver = new TCPReceiver("Receiver" + connectionname);
 		tcpReceiver.start();
-		if(log.isDebugEnabled()){
-			log.debug("A receiver thread is started to receive data from socket.");
-		}
+		log.info("A receiver thread is started to receive data from socket.");
+		
+		tcpSender = new TCPSender("Sender" + connectionname);
+		tcpSender.start();
+		log.info("A sender thread is started to send data to socket async.");
 	}
 
 	public void setReceiver(Receiver receiver) {
@@ -89,6 +97,10 @@ public class TCPIPConnection {
 					return;
 
 				closed = true;
+				
+				synchronized(sendMutex) {
+					sendMutex.notifyAll(); // wake up sender to stop
+				}
 
 				try {
 					if (is != null) {
@@ -125,13 +137,10 @@ public class TCPIPConnection {
 		if (data == null) {
 			return;
 		}
-		synchronized (mutex) {
-			if(os != null){
-				os.write(data);
-				os.flush();
-			}else{
-				throw new IOException("Connection is closed!!");
-			}
+		
+		sendQueue.offer(data);
+		synchronized (sendMutex) {
+			sendMutex.notifyAll();
 		}
 	}
 
@@ -204,7 +213,6 @@ public class TCPIPConnection {
 		}
 		try {
 			this.readBufferSize = readBufferSize;
-			//socket.setReceiveBufferSize(readBufferSize / 2);
 		} catch (Exception e) {
 		}
 	}
@@ -253,7 +261,7 @@ public class TCPIPConnection {
 		this.maxSilentTime = MILLISECONDS.convert(maxSilentTime, timeUnit);
 	}
 
-	protected void fireConnectionUnavailable() {
+	private void fireConnectionUnavailable() {
 		close();
 		if (receiver != null) {
 			receiver.connectionUnavailable();
@@ -266,6 +274,49 @@ public class TCPIPConnection {
 
 	public String getConnectionName() {
 		return this.connectionname;
+	}
+
+	private class TCPSender extends Thread {
+		public TCPSender(String receiverName) {
+			super(A2PThreadGroup.getInstance(), receiverName);
+			this.setPriority(Thread.MAX_PRIORITY); // Keep sender high priority for max throughput
+		}
+		public void run() {
+			try {
+				while (!closed) {
+					byte[] data = sendQueue.poll();
+					if (data != null) {
+						synchronized (mutex) {
+							if (os == null) continue;
+							
+							os.write(data);
+							
+							// Pipelining: immediately pop the rest of the queued PDUs while holding the lock
+							while ((data = sendQueue.poll()) != null) {
+								os.write(data);
+							}
+							
+							os.flush();
+						}
+					} else {
+						// Wait for new items in the queue
+						synchronized (sendMutex) {
+							if (sendQueue.isEmpty() && !closed) {
+								sendMutex.wait(200); // Prevent endless wait, wake up occasionally to check closed flag
+							}
+						}
+					}
+				}
+			} catch (IOException e) {
+				log.warn("TCPSender Connection unavailable due to exception.", e);
+				fireConnectionUnavailable();
+			} catch (InterruptedException e) {
+				log.warn("TCPSender interrupted.");
+			}
+			if (log.isInfoEnabled()) {
+				log.info("The TCPSender({}) is stopped", getName());
+			}
+		}
 	}
 
 	private class TCPReceiver extends Thread {
@@ -281,10 +332,11 @@ public class TCPIPConnection {
 		public void run() {
 			try {
 				ByteBuffer received = null;
-				byte[] input = new byte[readBufferSize];;
+				// 将 buffer 移出循环，消除每次高频心跳/收报文时的垃圾对象生成
+				byte[] input = new byte[readBufferSize];
 				int len = -1;
 				while (!closed) {
-					len = -1;					
+					len = -1;
 					len = is.read(input);
 
 					if (closed) {

@@ -7,13 +7,6 @@ import java.util.concurrent.ThreadPoolExecutor;
 import com.king.db.DatabaseStatus;
 import com.king.framework.*;
 import com.king.gmms.GmmsUtility;
-import com.king.gmms.customerconnectionfactory.InternalMQMConnectionFactory;
-import com.king.gmms.domain.ModuleManager;
-import com.king.gmms.ha.systemmanagement.SystemListener;
-import com.king.gmms.ha.systemmanagement.SystemSession;
-import com.king.gmms.ha.systemmanagement.SystemSessionFactory;
-import com.king.gmms.ha.systemmanagement.pdu.ModuleRegisterAck;
-import com.king.gmms.listener.InternalMQMListener;
 import com.king.gmms.mqm.task.TaskTimer;
 import com.king.gmms.threadpool.ExecutorServiceManager;
 import com.king.gmms.threadpool.ThreadPoolProfile;
@@ -31,7 +24,6 @@ public class MsgQueueMonitor implements A2PService, QueueTimeoutInterface {
 	private Map<String, TaskExecutor> taskExecutors = new HashMap<String, TaskExecutor>();
 	private List<MQMMessageSender> drSenders = null;
 	private List<MQMMessageSender> retrySenders = null;
-	private InternalMQMListener mqmListener = null;// internal listener
 	private SystemSession systemSession = null; // system client
 	private SystemSessionFactory sysFactory = null;
 	private boolean isEnableSysMgt = false;
@@ -44,7 +36,6 @@ public class MsgQueueMonitor implements A2PService, QueueTimeoutInterface {
 	 */
 	public MsgQueueMonitor() {
 		gmmsUtility = GmmsUtility.getInstance();
-		mqmListener = InternalMQMListener.getInstance();
 		isEnableSysMgt = gmmsUtility.isSystemManageEnable();
 		canHandover = gmmsUtility.isDBHandover();
 		if (isEnableSysMgt||canHandover) {
@@ -79,35 +70,22 @@ public class MsgQueueMonitor implements A2PService, QueueTimeoutInterface {
 		gmmsUtility.initRedisClient(redisStatus);
 		gmmsUtility.initDBManager(dbstatus);		
 		gmmsUtility.initCDRManager();
-		startMQMConnection();
-		mqmListener.start();
+		
+		// V4.1 Async Transformation: No more TCP MQM connection/listener needed
+		// startMQMConnection();
+		// mqmListener.start();
+		
 		startMessageSender();
 		startDelayDRMessageSender();
 		startTaskTimers();
 		startRedisRetrieveThread();
 		startRedisSendDelayDRThread();
-		log.info("Message monitor has started.");
+		log.info("Message monitor has started in asynchronous mode.");
 		return true;
 	}
 
-	/**
-	 * start agent message queue
-	 */
-	private void startMQMConnection() {
-		// start MessageQueue of InternalAgent
-		InternalMQMConnectionFactory mqmFactory = InternalMQMConnectionFactory
-				.getInstance();
-		ModuleManager moduleManager = ModuleManager.getInstance();
-		List<String> moduleNameList = moduleManager.getRouterModules();
-		if (moduleNameList != null) {
-			for (String routerModuleName : moduleNameList) {
-				mqmFactory.initInternalConnectionFactory(routerModuleName);
-			}
-		}
-	}
 
 	public boolean stopService() {
-		mqmListener.stop();
 		if (isEnableSysMgt||canHandover) {
 			beforeStop();
 			systemListener.stop();

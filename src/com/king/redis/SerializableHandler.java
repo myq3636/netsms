@@ -57,56 +57,31 @@ public class SerializableHandler {
 	}
 
 	public static Object stringToObject(String s) throws Exception {
-		if(s == null) {
+		if(s == null || "".equals(s.trim())) {
 			return null;
 		}
-		byte[] objData = parseByteArray(s);
-		ByteArrayInputStream bis = null;
-		ObjectInputStream ois = null;
-		try {
-			bis = new ByteArrayInputStream(objData);
-			ois = new ObjectInputStream(bis);
-		} catch (Exception e) {
-			throw e;
-		} finally {
-			if(bis != null) {
-				bis.close();
-			}
-			if(ois != null) {
-				ois.close();
-			}
-		}
-		return ois.readObject();
+		// Refactored in Phase 1: Pure FastJSON deserialization (No backward compatibility)
+		return com.alibaba.fastjson.JSON.parse(s);
 	}
 
 	public static String objectToString(Object obj) throws Exception {
 		if(obj==null){
 			return null;
 		}
-		if (!(obj instanceof Serializable)) {
-			throw new IllegalArgumentException(
-					"object must implements Serializable.");
+		// Refactored in Phase 1: FastJSON serialization
+		return com.alibaba.fastjson.JSON.toJSONString(obj, com.alibaba.fastjson.serializer.SerializerFeature.WriteClassName);
+	}
+
+	public static java.util.Map<String, String> convertGmmsMessageToStreamHash(GmmsMessage msg) throws Exception {
+		java.util.Map<String, String> hash = new java.util.HashMap<>();
+		if (msg == null) {
+			return hash;
 		}
-		ByteArrayOutputStream bos = new ByteArrayOutputStream();
-		ObjectOutputStream oos = null;
-		byte[] objData = null;
-		try {
-			oos = new ObjectOutputStream(bos);
-			oos.writeObject(obj);
-			oos.flush();
-			objData = bos.toByteArray();
-		} catch (Exception e) {
-			throw e;
-		} finally {
-			if(bos != null) {
-				bos.close();
-			}
-			if(oos != null) {
-				oos.close();
-			}
-		}
-		
-		return formatByteArray(objData);
+		hash.put("MsgID", msg.getMsgID() != null ? msg.getMsgID() : "");
+		hash.put("DestAddr", msg.getRecipientAddress() != null ? msg.getRecipientAddress() : "");
+		hash.put("SSID", msg.getRoutingSsIDs() != null ? msg.getRoutingSsIDs() : (msg.getOSsID() != 0 ? String.valueOf(msg.getOSsID()) : ""));
+		hash.put("data", objectToString(msg));
+		return hash;
 	}
 
 	public static byte[] parseByteArray(String s) {

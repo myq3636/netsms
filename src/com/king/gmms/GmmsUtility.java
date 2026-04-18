@@ -31,6 +31,7 @@ import com.king.gmms.threadpool.impl.DefaultExecutorServiceManager;
 import com.king.gmms.util.SystemConstants;
 import com.king.message.gmms.*;
 import com.king.redis.RedisClient;
+import com.king.gmms.metrics.MetricsReporter;
 
 import java.util.regex.Pattern;
 import java.util.regex.Matcher;
@@ -146,6 +147,10 @@ public class GmmsUtility {
 	 */
 	private int dynamicCustInThresholdExipreTime;
 
+	// V4.0 Redis Stream Sharding
+	private int totalShards = 1;
+	private Set<Integer> myShards = new HashSet<>();
+
 	/**
 	 *  The system max average incoming threshold (per second).
 	 */
@@ -186,6 +191,8 @@ public class GmmsUtility {
      */
     private int min_ID_expireTime = 0;
     
+    private com.king.framework.lifecycle.RedisControlSubscriber controlSubscriber;
+
 	private GmmsUtility() {
 		initialized = false;
 		screenedIPs = new HashSet<String>();
@@ -200,12 +207,24 @@ public class GmmsUtility {
 	public void close() {
 		initialized = false;
 		try {
+			if (controlSubscriber != null) {
+				controlSubscriber.stop();
+			}
 			if (executorServiceManager != null) {
 				executorServiceManager.shutdownAll();
 			}
 			
 		} catch (Exception e) {
 			log.error(e, e);
+		}
+	}
+
+	public void startControlSubscriber() {
+		if (controlSubscriber == null) {
+			controlSubscriber = new com.king.framework.lifecycle.RedisControlSubscriber();
+			Thread t = new Thread(controlSubscriber, "RedisControlSubscriberThread");
+			t.setDaemon(true);
+			t.start();
 		}
 	}
 
@@ -365,6 +384,11 @@ public class GmmsUtility {
 			}
 
 			this.cmTempFile = a2phome+"/temp/"+moduleName+"_tempCm.cfg."+new SimpleDateFormat("yyyy-MM-dd").format(new Date());
+			
+			// V4.0 Node ID initialization for distributed uniqueness
+			int nodeId = Integer.parseInt(props.getProperty("NodeID", "0").trim());
+			com.king.message.gmms.MessageIdGenerator.setNodeId(nodeId);
+			
 			routerModule = props.getProperty("RouterModule", "DeliveryRouter")
 					.trim();
 			serverIP = props.getProperty("ServerIP").trim();
@@ -434,6 +458,31 @@ public class GmmsUtility {
 			
 			blackholeSsid = Integer.parseInt(props.getProperty(
 					"BlackholeSsid", "-1").trim());
+			
+			// V4.0 Sharding Configuration
+			totalShards = Integer.parseInt(props.getProperty("TotalShards", "1").trim());
+			String myShardsStr = props.getProperty("MyShards", "0").trim();
+			try {
+				if (myShardsStr.contains("-")) {
+					String[] parts = myShardsStr.split("-");
+					int start = Integer.parseInt(parts[0].trim());
+					int end = Integer.parseInt(parts[1].trim());
+					for (int i = start; i <= end; i++) {
+						myShards.add(i);
+					}
+				} else {
+					String[] parts = myShardsStr.split(",");
+					for (String p : parts) {
+						if (!p.trim().isEmpty()) {
+							myShards.add(Integer.parseInt(p.trim()));
+						}
+					}
+				}
+			} catch (Exception e) {
+				log.error("Failed to parse MyShards: " + myShardsStr, e);
+				// Default to shard 0 if parsing fails
+				myShards.add(0);
+			}
 			
 			// throttling control conf
 			conSecThrottleWinNumToAlert = Integer.parseInt(props.getProperty(
@@ -539,11 +588,23 @@ public class GmmsUtility {
 			maxMessageExpireTimeFromCust = Integer.parseInt(props.getProperty(
 					"MaxMessageExpireTimeFromCust", "10080").trim());
 			
+			// Start metrics reporter
+			int metricsInterval = Integer.parseInt(props.getProperty("Metrics.ReportIntervalSeconds", "30").trim());
+			MetricsReporter.getInstance().start(metricsInterval);
+			
 			initialized = true;
 		} catch (Exception e) {
 			log.fatal("GmmsUtility initUtility failed", e);
 			System.exit(-1);
 		}
+	}
+
+	public int getTotalShards() {
+		return totalShards;
+	}
+
+	public Set<Integer> getMyShards() {
+		return myShards;
 	}
 	
 	public boolean isLoopbackAddress(String address) {

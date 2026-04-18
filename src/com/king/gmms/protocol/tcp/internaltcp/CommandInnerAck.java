@@ -9,6 +9,12 @@ import com.king.gmms.util.BufferMonitor;
 import com.king.message.gmms.GmmsMessage;
 import com.king.message.gmms.GmmsStatus;
 
+/**
+ * @deprecated V4.4 废弃。Fast Accept 架构下，Server 在 produceSubmitMessage 后
+ *             立即响应客户端，Core 通过 MTStreamConsumer/ResultStreamConsumer 独立完成 CDR 闭环，
+ *             不再有任何跨模块 InnerAck TCP 通知。本类不再被 InternalAgentSession 实例化。
+ */
+@Deprecated
 public class CommandInnerAck
     extends Respond {
     private static SystemLogger log = SystemLogger.getSystemLogger(CommandInnerAck.class);

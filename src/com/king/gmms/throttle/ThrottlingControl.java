@@ -32,9 +32,7 @@ import com.king.gmms.ha.systemmanagement.pdu.ApplyInThrottleQuota;
  */
 public class ThrottlingControl {
 	private static SystemLogger log = SystemLogger.getSystemLogger(ThrottlingControl.class);
-	private ConcurrentMap<Integer, ThrottlingTimemark> incomingThrottlingControlCache;
-	private ConcurrentMap<Integer, ThrottlingTimemark> outgoingThrottlingControlCache;
-	private ConcurrentMap<Integer, ThrottlingTimemark> coreProcessorThrottlingControlCache;
+
 	private ConcurrentMap<Integer, ThrottlingAlertMark> incomingThrottlingAlertCache;
 	private ConcurrentMap<Integer, ThrottlingAlertMark> outgoingThrottlingAlertCache;
 	
@@ -60,9 +58,7 @@ public class ThrottlingControl {
 	 * constructor
 	 */
 	private ThrottlingControl() {
-		incomingThrottlingControlCache = new ConcurrentHashMap<Integer, ThrottlingTimemark>();
-		outgoingThrottlingControlCache = new ConcurrentHashMap<Integer, ThrottlingTimemark>();
-		coreProcessorThrottlingControlCache = new ConcurrentHashMap<Integer, ThrottlingTimemark>();
+
 		incomingThrottlingAlertCache = new ConcurrentHashMap<Integer, ThrottlingAlertMark>();
 		outgoingThrottlingAlertCache = new ConcurrentHashMap<Integer, ThrottlingAlertMark>();
 		
@@ -91,32 +87,31 @@ public class ThrottlingControl {
 	 */
 	public boolean isAllowedToReceive(int ssid) {
 		try {
-			ThrottlingTimemark throttlingTimemark = incomingThrottlingControlCache.get(ssid);
-			if (throttlingTimemark == null) {
-				A2PCustomerInfo server = custManager.getCustomerBySSID(ssid);
-				int throttlingNum = server.getConfigedIncomingThrottlingNum();
-				if (throttlingNum <= 0) {
-					return true;
-				}
-				// init
-				incomingThrottlingControlCache.putIfAbsent(ssid, new ThrottlingTimemark(throttlingNum));
-				throttlingTimemark = incomingThrottlingControlCache.get(ssid);
-				if(log.isTraceEnabled()){
-					log.trace("Ssid: {} init incoming throttlingNum is {}",ssid, throttlingNum);
-				}
-			} 
+			A2PCustomerInfo server = custManager.getCustomerBySSID(ssid);
+			int throttlingNum = server.getConfigedIncomingThrottlingNum();
+			if (throttlingNum <= 0) {
+				return true;
+			}
 			
-			long slidingWinStartTime = throttlingTimemark.processThrottlingControl(true);
+			long currentSecond = System.currentTimeMillis() / 1000;
+			String limitKey = "throttle:in:" + ssid + ":" + currentSecond;
+			Long currentCount = 1L;
+			if (gmmsUtility.getRedisClient() != null && gmmsUtility.getRedisClient().getStateRedis() != null) {
+				currentCount = gmmsUtility.getRedisClient().getStateRedis().incrString(limitKey);
+				if (currentCount != null && currentCount == 1L) {
+					gmmsUtility.getRedisClient().getStateRedis().setExpired(limitKey, 2);
+				}
+			}
 
 			// not pass throttling control
-			if (slidingWinStartTime > 0) {
-				A2PCustomerInfo cust = custManager.getCustomerBySSID(ssid);
+			if (currentCount != null && currentCount > throttlingNum) {
+				A2PCustomerInfo cust = server;
 				// apply quota
 				if ((canHandover || isEnableSysMgt) && cust.isApplyInThrottleFlag()) {
 					// set flag, avoid apply msg flood
 					cust.setApplyInThrottleFlag(false);
 					
-					int currentThrottlingNum = throttlingTimemark.getDateArraySize();
+					int currentThrottlingNum = currentCount.intValue();
 					int maxThrottlingNum = gmmsUtility.getMaxCustIncomingThresholdMagnification() * cust.getConfigedIncomingThrottlingNum();
 					int sysIncomingThreshold = gmmsUtility.getSystemIncomingThreshold();
 					if (currentThrottlingNum < sysIncomingThreshold && currentThrottlingNum < maxThrottlingNum) {
@@ -140,7 +135,7 @@ public class ThrottlingControl {
 					incomingThrottlingAlertCache.putIfAbsent(ssid, new ThrottlingAlertMark());
 					throttlingAlertMark = incomingThrottlingAlertCache.get(ssid);
 				} 
-				throttlingAlertMark.processAlertMail(ssid, true, slidingWinStartTime, throttlingTimemark.getDateArraySize());
+				throttlingAlertMark.processAlertMail(ssid, true, System.currentTimeMillis(), throttlingNum);
 				
 				return false;
 			} else {
@@ -173,36 +168,24 @@ public class ThrottlingControl {
 
 	public boolean isAllowedToSend(int ssid) {
 		try {
-			ThrottlingTimemark throttlingTimemark = outgoingThrottlingControlCache.get(ssid);
-			if (throttlingTimemark == null) {
-				A2PCustomerInfo server = custManager.getCustomerBySSID(ssid);
-				int throttlingNum = server.getOutgoingThrottlingNum();
-				if (throttlingNum <= 0) {
-					return true;
-				}
-				// init
-				outgoingThrottlingControlCache.putIfAbsent(ssid, new ThrottlingTimemark(throttlingNum));
-				throttlingTimemark = outgoingThrottlingControlCache.get(ssid);
-				if(log.isTraceEnabled()){
-					log.trace("Ssid: {} init outgoing throttlingNum is {}",ssid, throttlingNum);
-				}
-			} 
+			A2PCustomerInfo server = custManager.getCustomerBySSID(ssid);
+			int throttlingNum = server.getOutgoingThrottlingNum();
+			if (throttlingNum <= 0) {
+				return true;
+			}
 			
-			long slidingWinStartTime = throttlingTimemark.processThrottlingControl(false);
+			long currentSecond = System.currentTimeMillis() / 1000;
+			String limitKey = "throttle:out:" + ssid + ":" + currentSecond;
+			Long currentCount = 1L;
+			if (gmmsUtility.getRedisClient() != null && gmmsUtility.getRedisClient().getStateRedis() != null) {
+				currentCount = gmmsUtility.getRedisClient().getStateRedis().incrString(limitKey);
+				if (currentCount != null && currentCount == 1L) {
+					gmmsUtility.getRedisClient().getStateRedis().setExpired(limitKey, 2);
+				}
+			}
 
 			// not pass throttling control, process alert mail
-			if (slidingWinStartTime > 0) {
-				
-				/*
-				 * ThrottlingAlertMark throttlingAlertMark =
-				 * outgoingThrottlingAlertCache.get(ssid); if (throttlingAlertMark == null) {
-				 * outgoingThrottlingAlertCache.putIfAbsent(ssid, new ThrottlingAlertMark());
-				 * throttlingAlertMark = outgoingThrottlingAlertCache.get(ssid); }
-				 * 
-				 * 
-				 * throttlingAlertMark.processAlertMail(ssid, false, slidingWinStartTime,
-				 * throttlingTimemark.getDateArraySize());
-				 */
+			if (currentCount != null && currentCount > throttlingNum) {
 				return false;
 			}
 		} catch (Exception e) {
@@ -213,33 +196,24 @@ public class ThrottlingControl {
 	
 	public boolean isAllowedToHander(int ssid) {
 		try {
-			ThrottlingTimemark throttlingTimemark = coreProcessorThrottlingControlCache.get(ssid);
-			if (throttlingTimemark == null) {
-				A2PCustomerInfo server = custManager.getCustomerBySSID(ssid);
-				int throttlingNum = server.getCoreProcessorThrottlingNum();
-				if (throttlingNum <= 0) {
-					return true;
-				}
-				// init
-				coreProcessorThrottlingControlCache.putIfAbsent(ssid, new ThrottlingTimemark(throttlingNum));
-				throttlingTimemark = coreProcessorThrottlingControlCache.get(ssid);
-				if(log.isTraceEnabled()){
-					log.trace("Ssid: {} init processer throttlingNum is {}",ssid, throttlingNum);
-				}
-			} 
+			A2PCustomerInfo server = custManager.getCustomerBySSID(ssid);
+			int throttlingNum = server.getCoreProcessorThrottlingNum();
+			if (throttlingNum <= 0) {
+				return true;
+			}
 			
-			long slidingWinStartTime = throttlingTimemark.processThrottlingControl(false);
+			long currentSecond = System.currentTimeMillis() / 1000;
+			String limitKey = "throttle:core:" + ssid + ":" + currentSecond;
+			Long currentCount = 1L;
+			if (gmmsUtility.getRedisClient() != null && gmmsUtility.getRedisClient().getStateRedis() != null) {
+				currentCount = gmmsUtility.getRedisClient().getStateRedis().incrString(limitKey);
+				if (currentCount != null && currentCount == 1L) {
+					gmmsUtility.getRedisClient().getStateRedis().setExpired(limitKey, 2);
+				}
+			}
 
 			// not pass throttling control, process alert mail
-			if (slidingWinStartTime > 0) {
-				/*ThrottlingAlertMark throttlingAlertMark = outgoingThrottlingAlertCache.get(ssid);
-				if (throttlingAlertMark == null) {
-					outgoingThrottlingAlertCache.putIfAbsent(ssid, new ThrottlingAlertMark());
-					throttlingAlertMark = outgoingThrottlingAlertCache.get(ssid);
-				} 
-				
-				throttlingAlertMark.processAlertMail(ssid, false, slidingWinStartTime, throttlingTimemark.getDateArraySize());
-				*/
+			if (currentCount != null && currentCount > throttlingNum) {
 				return false;
 			}
 		} catch (Exception e) {
@@ -267,18 +241,13 @@ public class ThrottlingControl {
 		return expireInThottleQuotaMap;
 	}
 
-	public ConcurrentMap<Integer, ThrottlingTimemark> getIncomingThrottlingControlCache() {
-		return incomingThrottlingControlCache;
-	}
+
 	
 	/**
 	 * clearThrottlingControlCache
 	 * @param ssid
 	 */
 	public void clearThrottlingControlCache(int ssid){
-		incomingThrottlingControlCache.remove(ssid);
-		outgoingThrottlingControlCache.remove(ssid);
-		coreProcessorThrottlingControlCache.remove(ssid);
 		incomingThrottlingAlertCache.remove(ssid);
 		outgoingThrottlingAlertCache.remove(ssid);
 		expireInThottleQuotaMap.remove(ssid);

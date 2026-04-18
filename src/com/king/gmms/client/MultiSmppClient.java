@@ -11,9 +11,6 @@ import com.king.gmms.domain.A2PCustomerInfo;
 import com.king.gmms.domain.A2PMultiConnectionInfo;
 import com.king.gmms.domain.A2PSingleConnectionInfo;
 import com.king.gmms.domain.ModuleManager;
-import com.king.gmms.routing.ADSServerMonitor;
-import com.king.gmms.throttle.ReportInMsgCountTimer;
-import com.king.gmms.throttle.ResetDynamicCustInThresholdTimer;
 import com.king.message.gmms.GmmsMessage;
 
 public class MultiSmppClient extends AbstractClient {
@@ -22,9 +19,6 @@ public class MultiSmppClient extends AbstractClient {
 	private final String PROTOCOL_NAME = "SMPP";
 	private InternalAgentConnectionFactory agentFactory = null;
 	private MultiSmppClientFactory customerFactory = null;
-	private ReportInMsgCountTimer reportInMsgCountTimer = null;
-	private ResetDynamicCustInThresholdTimer resetDynamicCustInThresholdTimer = null;
-
 	public MultiSmppClient() {
 		customerFactory = MultiSmppClientFactory.getInstance();
 	}
@@ -89,35 +83,22 @@ public class MultiSmppClient extends AbstractClient {
 
 	public boolean startService() {
 		initConnectionFactory();
-		//ADSServerMonitor.getInstance().start();// start thread to monitor the DNS server connection
 		if (!initSystemManagement()) {
 			log.warn("module register failed!");
 		}
 		customerFactory.initializeSession();
 		
-		if((canHandover || isEnableSysMgt) && systemSession != null){
-			reportInMsgCountTimer = new ReportInMsgCountTimer(systemSession, 
-					gmmsUtility.getReportModuleIncomingMsgCountInterval());
-			reportInMsgCountTimer.startTimer("reportInMsgCountTimer");
-			resetDynamicCustInThresholdTimer = 
-				new ResetDynamicCustInThresholdTimer(gmmsUtility.getDynamicCustInThresholdExipreTime()/3);
-			resetDynamicCustInThresholdTimer.startTimer("resetDynamicCustInThresholdTimer");
-		}
-		
 		startAgentConnection();
-		agentListener.start();
+		
+		// V4.0 Start Redis Heartbeat
+		startRedisHeartbeat();
+		
 		return true;
 	}
 
 	public boolean stopService() {
-		if (canHandover || isEnableSysMgt) {
-			beforeStop();
-			systemListener.stop();
-			if (systemSession != null) {
-				systemSession.shutdown();
-			}
-		}
-		agentListener.stop();
+		beforeStop();
+		stopRedisHeartbeat();
 		return false;
 	}
 
@@ -125,14 +106,6 @@ public class MultiSmppClient extends AbstractClient {
 	 * send stop request
 	 */
 	public void beforeStop() {
-		if (canHandover || isEnableSysMgt) {
-			reportInMsgCountTimer.stopTimer();
-			resetDynamicCustInThresholdTimer.stopTimer();
-			ConnectionManagementForFunction systemManager = customerFactory.getSystemManager();
-			boolean flag = systemManager.moduleStop(module);
-			if (flag) {
-				systemSession.moduleStop();
-			}
-		}
+		// Module stopping handled implicitly by heartbeat expiry
 	}
 }

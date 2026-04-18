@@ -69,7 +69,7 @@ public class CDRManager {
 			A2PCustomerInfo rCustomer = gmmsUtility.getCustomerManager().getCustomerBySSID(cdr.getRSsID());		    
 		     if((oCustomer!=null && oCustomer.isSmsOptionWrMonitorCDR())||(rCustomer!=null && rCustomer.isSmsOptionWrMonitorCDR())) {
 		    	 String redisCDRStr = makeRedisCDR(cdr);
-		 		gmmsUtility.getRedisClient().lpush("CDR", redisCDRStr);
+		 		gmmsUtility.getRedisClient().asyncLpush("CDR", redisCDRStr);
 		     }
 		} catch (Exception e) {
 			// TODO: handle exception
@@ -233,7 +233,7 @@ public class CDRManager {
 							makeCdrStrEnclosed(gmmsUtility.modifybackslash(cdr
 									.getTextContent(), 1))).append(",");
 					cdrToRedis.append(new Date().getTime());
-					gmmsUtility.getRedisClient().lpush("CDR", cdrToRedis.toString());
+					gmmsUtility.getRedisClient().asyncLpush("CDR", cdrToRedis.toString());
 				}
 			} catch (Exception e) {
 				// TODO: handle exception
@@ -416,14 +416,14 @@ public class CDRManager {
 			if(gmmsUtility.getCustomerManager()
 			.getCustomerBySSID(ossid)
 			.isNeedStatisticMsgCount()){
-				gmmsUtility.getRedisClient().hashINC("StMsgCount", "IN:"+ossid);
+				gmmsUtility.getRedisClient().asyncHashInc("StMsgCount", "IN:"+ossid);
 			}
 			
 			if(gmmsUtility.getCustomerManager()
 					.getCustomerBySSID(ossid)
 					.isNeedStatisticMsgCountByCountry()){
 				String cc = PhoneUtils.getRegionCodeByPhone(msg.getRecipientAddress());
-				gmmsUtility.getRedisClient().hashINC("StMsgCount", "IN:"+ossid+":"+cc);
+				gmmsUtility.getRedisClient().asyncHashInc("StMsgCount", "IN:"+ossid+":"+cc);
 			}
 			
 		} catch (Exception e) {
@@ -458,13 +458,13 @@ public class CDRManager {
 			if(gmmsUtility.getCustomerManager()
 			.getCustomerBySSID(rssid)
 			.isNeedStatisticMsgCount()&& msg.getStatusCode()!=2500){
-				gmmsUtility.getRedisClient().hashINC("StMsgCount", "OUT:"+rssid);
+				gmmsUtility.getRedisClient().asyncHashInc("StMsgCount", "OUT:"+rssid);
 			}
 			if(gmmsUtility.getCustomerManager()
 					.getCustomerBySSID(rssid)
 					.isNeedStatisticMsgCountByCountry()&& msg.getStatusCode()!=2500){
 				String cc = PhoneUtils.getRegionCodeByPhone(msg.getRecipientAddress());
-				gmmsUtility.getRedisClient().hashINC("StMsgCount", "OUT:"+rssid+":"+cc);						
+				gmmsUtility.getRedisClient().asyncHashInc("StMsgCount", "OUT:"+rssid+":"+cc);						
 			}
 		} catch (Exception e) {
 			
@@ -480,13 +480,13 @@ public class CDRManager {
 			if(gmmsUtility.getCustomerManager()
 			.getCustomerBySSID(rssid)
 			.isNeedStatisticMsgCount() && msg.getStatusCode()!=2500){
-				gmmsUtility.getRedisClient().hashINC("StMsgCount", "OUT:"+rssid);
+				gmmsUtility.getRedisClient().asyncHashInc("StMsgCount", "OUT:"+rssid);
 			}
 			if(gmmsUtility.getCustomerManager()
 					.getCustomerBySSID(rssid)
 					.isNeedStatisticMsgCountByCountry()&& msg.getStatusCode()!=2500){
 				String cc = PhoneUtils.getRegionCodeByPhone(msg.getRecipientAddress());
-				gmmsUtility.getRedisClient().hashINC("StMsgCount", "OUT:"+rssid+":"+cc);						
+				gmmsUtility.getRedisClient().asyncHashInc("StMsgCount", "OUT:"+rssid+":"+cc);						
 			}
 		} catch (Exception e) {
 			
@@ -557,14 +557,14 @@ public class CDRManager {
 			if(gmmsUtility.getCustomerManager()
 			.getCustomerBySSID(rssid)
 			.isNeedStatisticMsgCount()){
-				gmmsUtility.getRedisClient().hashINC("StMsgCount", "OUTDR:"+rssid);
+				gmmsUtility.getRedisClient().asyncHashInc("StMsgCount", "OUTDR:"+rssid);
 			}
 			
 			if(gmmsUtility.getCustomerManager()
 					.getCustomerBySSID(rssid)
 					.isNeedStatisticMsgCountByCountry()){
 				String cc = PhoneUtils.getRegionCodeByPhone(msg.getRecipientAddress());
-				gmmsUtility.getRedisClient().hashINC("StMsgCount", "OUTDR:"+rssid+":"+cc);						
+				gmmsUtility.getRedisClient().asyncHashInc("StMsgCount", "OUTDR:"+rssid+":"+cc);						
 			}
 			
 		} catch (Exception e) {
@@ -581,13 +581,13 @@ public class CDRManager {
 			if(gmmsUtility.getCustomerManager()
 			.getCustomerBySSID(rssid)
 			.isNeedStatisticMsgCount()){
-				gmmsUtility.getRedisClient().hashINC("StMsgCount", "OUTDR:"+rssid);
+				gmmsUtility.getRedisClient().asyncHashInc("StMsgCount", "OUTDR:"+rssid);
 			}
 			if(gmmsUtility.getCustomerManager()
 					.getCustomerBySSID(rssid)
 					.isNeedStatisticMsgCountByCountry()){
 				String cc = PhoneUtils.getRegionCodeByPhone(msg.getRecipientAddress());
-				gmmsUtility.getRedisClient().hashINC("StMsgCount", "OUTDR:"+rssid+":"+cc);						
+				gmmsUtility.getRedisClient().asyncHashInc("StMsgCount", "OUTDR:"+rssid+":"+cc);						
 			}
 		} catch (Exception e) {
 			

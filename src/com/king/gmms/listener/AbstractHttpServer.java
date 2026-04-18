@@ -159,7 +159,9 @@ public abstract class AbstractHttpServer extends HttpServlet implements
 		}
 		try {
 			DatabaseStatus dbstatus = DatabaseStatus.MASTER_USED;
-			String redisStatus = "M";
+			String redisStatus = "M"; // V4.0 Default to Master, synchronized via Redis Pub/Sub
+			/*
+			 * V4.0 微服务化：关闭旧式 TCP SystemListener，由 RedisControlSubscriber 接管 
 			if ((canHandover ||isEnableSysMgt) && !systemListener.isRunning()) {
 				systemListener.start();
 				if (systemSession != null) {
@@ -173,6 +175,7 @@ public abstract class AbstractHttpServer extends HttpServlet implements
 					resetDynamicCustInThresholdTimer.startTimer("resetDynamicCustInThresholdTimer");
 				}
 			}
+			*/
 			gmmsUtility.initRedisClient(redisStatus);
 			gmmsUtility.initDBManager(dbstatus);
 			System.out.println("Starting service:"

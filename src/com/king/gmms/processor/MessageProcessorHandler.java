@@ -16,6 +16,8 @@ import com.king.gmms.threadpool.ThreadPoolProfileBuilder;
 import com.king.message.gmms.GmmsMessage;
 import com.king.message.gmms.GmmsStatus;
 import com.king.redis.SerializableHandler;
+import com.king.gmms.metrics.MetricsCollector;
+import com.king.gmms.messagequeue.ResultStreamConsumer;
 
 public class MessageProcessorHandler extends ProcessorHandler{
 	
@@ -26,6 +28,7 @@ public class MessageProcessorHandler extends ProcessorHandler{
     private volatile boolean initialization = false;
     private ExecutorService priorityThreadPool;
 	private String moduleName; 
+	private ResultStreamConsumer resultConsumer = null;
 
 	private MessageProcessorHandler(){
         try {
@@ -46,7 +49,11 @@ public class MessageProcessorHandler extends ProcessorHandler{
 	        if (ModuleManager.getInstance().getRouterModules().contains(moduleName)) {
 	        	for (int i = 0; i < coreProcessorNum; i++) {
 	        		priorityThreadPool.execute(new CorePrioritrySender(handlerThreadPool, moduleName));
-				}	        	
+				}	
+	        	
+	        	// V4.1 Initialize and start the Redis results consumer for Core
+	        	resultConsumer = new ResultStreamConsumer();
+	        	resultConsumer.start();
 			}	        
 	        
 		} catch (Exception e) {
@@ -74,12 +81,16 @@ public class MessageProcessorHandler extends ProcessorHandler{
 		return instance;
 	}
 
+	public ExecutorService getHandlerThreadPool() {
+		return handlerThreadPool;
+	}
 	
 	public boolean putMsg(GmmsMessage message){
 		boolean ret = false;
 		if(message == null){
 			return ret;
 		}
+		MetricsCollector.getInstance().incrementCounter("processor.putMsg.total");
 		try {
 			A2PCustomerInfo cst = gmmsUtility.getCustomerManager().getCustomerBySSID(message.getRSsID());
 			A2PCustomerInfo oInfo = gmmsUtility.getCustomerManager().getCustomerBySSID(message.getOSsID());
@@ -130,7 +141,8 @@ public class MessageProcessorHandler extends ProcessorHandler{
 					}					
 					String msgSeri = SerializableHandler.convertGmmsMessage2RedisMessageForCorePriority(message);
 					String key = "CorePriority_processer_"+moduleName+"_"+cst.getSSID()+"_"+priority;
-					gmmsUtility.getRedisClient().lpush(key, msgSeri);
+					gmmsUtility.getRedisClient().asyncLpush(key, msgSeri);
+					MetricsCollector.getInstance().incrementCounter("processor.putMsg.corePriority");
 					log.debug(message, "put message to redis queue");
 					/*if (((ThreadPoolExecutor)priorityThreadPool).getActiveCount()==0) {
 						priorityThreadPool.execute(new PrioritrySender(senderThreadPool, cst, connectionManager, moduleName));
@@ -162,6 +174,7 @@ public class MessageProcessorHandler extends ProcessorHandler{
 			if (log.isInfoEnabled()) {
 				log.info("putMsg exception: ", e);
 			}
+			MetricsCollector.getInstance().incrementCounter("processor.putMsg.error");
 			ret = false;
 		}
 		return ret;

@@ -39,12 +39,6 @@ public class LongConnectionCustomerMessageQueue extends CustomerMessageQueue{
         int processNum = cst.getPrioritryHanderNumber();
         priorityThreadPool = executorServiceManager.newFixedThreadPool(this, "CustPriority_" + queueName, processNum);
         moduleName = System.getProperty("module");
-        if (ModuleManager.getInstance().getClientModules().contains(moduleName) 
-        		&& !cst.getPriorityPercentMap().isEmpty()) {
-        	for (int i = 0; i < processNum; i++) {
-        		priorityThreadPool.execute(new PrioritrySender(senderThreadPool, cst, connectionManager, moduleName));
-			}        	
-		}
 	}
 	
 	public boolean putMsg(GmmsMessage msg) {
@@ -71,12 +65,13 @@ public class LongConnectionCustomerMessageQueue extends CustomerMessageQueue{
 						&& !map.isEmpty() 
 						&& cst.getOutgoingThrottlingNum() > 0
 						&& ModuleManager.getInstance().getClientModules().contains(moduleName) ) {
-					String msgSeri = SerializableHandler.convertGmmsMessage2RedisMessageForCorePriority(msg);
-					gmmsUtility.getRedisClient().lpush("Priority_"+moduleName+"_"+cst.getSSID()+"_"+priority, msgSeri);
-					log.trace(msg, "put message to redis queue");
-					/*if (((ThreadPoolExecutor)priorityThreadPool).getActiveCount()==0) {
-						priorityThreadPool.execute(new PrioritrySender(senderThreadPool, cst, connectionManager, moduleName));
-					}*/
+					// V4.1 迁移：不再使用 Priority List 轮询，转而投递到针对此节点的输出流
+					boolean produceSuccess = gmmsUtility.getStreamQueueManager().produceOutboundMessage(msg);
+					if (!produceSuccess) {
+						log.error(msg, "Failed to produce message to Outbound Stream in putMsg!");
+					} else {
+						log.trace(msg, "put message to outbound stream");
+					}
 				}else {
 					senderThreadPool.execute(new CustomerMessageSender(msg, connectionManager, cst));
 				}

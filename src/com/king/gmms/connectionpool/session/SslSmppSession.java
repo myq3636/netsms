@@ -50,7 +50,7 @@ public class SslSmppSession extends MultiSmppSession {
             return true;
         }
         int ssid = customerInfo.getSSID();
-        int applySuccess = applyNewSession();
+        int applySuccess = 0;// applyNewSession();
         if(applySuccess!=0){
         	if(applySuccess==3){
         		log.warn("applyNewSession failed!");

@@ -16,6 +16,7 @@ import com.king.gmms.messagequeue.CustomerMessageQueue;
 import com.king.gmms.messagequeue.OperatorMessageQueue;
 import com.king.gmms.messagequeue.ShortConnectionCustomerMessageQueue;
 import com.king.message.gmms.GmmsMessage;
+import com.king.gmms.messagequeue.HttpClientConsumer;
 
 public class CommonHttpClientFactory extends ShortConnectionFactory {
 	private static SystemLogger log = SystemLogger
@@ -24,11 +25,16 @@ public class CommonHttpClientFactory extends ShortConnectionFactory {
 	
 	private ConcurrentHashMap<Integer,QueryHttpMessageThread[]> queryThreads = null;
 	private ConcurrentHashMap<String,String> queryMinID = null;  //save queryID,  value type: <shortName:queryID>
+	private HttpClientConsumer clientConsumer = null;
 	private CommonHttpClientFactory() {
 		super();
 		queryThreads = new ConcurrentHashMap<Integer,QueryHttpMessageThread[]>();
 		queryMinID = new ConcurrentHashMap<String,String>();
-		isServer = false;				
+		isServer = false;
+		
+		// V4.1 Initialize and start the Redis Stream consumer for outbound tasks
+		clientConsumer = new HttpClientConsumer();
+		clientConsumer.start();
 	}
 
 	protected void startOperatorMessageQueue(OperatorMessageQueue queue,

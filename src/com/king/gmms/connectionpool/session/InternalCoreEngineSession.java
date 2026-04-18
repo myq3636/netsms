@@ -45,12 +45,14 @@ import com.king.message.gmms.MessageStoreManager;
 import com.king.message.gmms.SdqMessageManager;
 import com.king.redis.RedisClient;
 import com.king.redis.SerializableHandler;
+import com.king.gmms.metrics.MetricsCollector;
 
 public class InternalCoreEngineSession extends AbstractInternalSession{
 
 	private static SystemLogger log = SystemLogger
 			.getSystemLogger(InternalCoreEngineSession.class);
 	private final static Object sync = new Object();
+	private static final MetricsCollector metrics = MetricsCollector.getInstance();
     protected BufferMonitorWithSafeExit outBuffer = null;
     protected BufferMonitor inBuffer = null;
     protected int windowsSize = 50000;
@@ -67,6 +69,32 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
 	private boolean isRedisEnable = false;
     private boolean isStoreDRModeEnable = false;
 	private RedisClient redis = null;
+	
+	private static InternalCoreEngineSession reactiveInstance = null;
+	public static synchronized InternalCoreEngineSession getReactiveInstance() {
+		if (reactiveInstance == null) {
+			reactiveInstance = new InternalCoreEngineSession();
+		}
+		return reactiveInstance;
+	}
+	
+	protected InternalCoreEngineSession() {
+		super();
+		moduleManager = ModuleManager.getInstance();
+		msgStoreManager = gmmsUtility.getMessageStoreManager();
+		ctm = gmmsUtility.getCustomerManager();
+		csm = ContentScanMilter.getInstance();
+		factory = InternalCoreEngineConnectionFactory.getInstance();
+		isStoreDRModeEnable = gmmsUtility.isStoreDRModeEnable();
+		if ("True".equalsIgnoreCase(gmmsUtility.getCommonProperty("RedisEnable", "True"))) {
+			isRedisEnable = true;
+			redis = gmmsUtility.getRedisClient();
+		}
+		deliveryRouterHandler = DeliveryRouterHandler.getInstance();
+		processorHandler = MessageProcessorHandler.getInstance();
+		csmHandler = CsmProcessorHandler.getInstance();
+		sdqManager = SdqMessageManager.getInstance();
+	}
     
     public InternalCoreEngineSession(ConnectionInfo connectionInfo){
         super();
@@ -172,19 +200,28 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
 		if (obj == null) {
 			return true;
 		}
+		long _receiveStart = System.nanoTime();
 		Pdu pdu = (Pdu) obj;
 		GmmsMessage msg = null;
+		metrics.incrementCounter("core.receive.total");
 		if(log.isTraceEnabled()){
 			log.trace("Internal Core Engine Session receive a PDU {}", pdu
 				.getCommandId());
 		}
 		if (Pdu.COMMAND_SUBMIT == pdu.getCommandId()) {
+			metrics.incrementCounter("core.receive.submit");
 			msg = pdu.convertToMsg(null);
 			if (msg != null) {
 				if(log.isInfoEnabled()){
 					log.info(msg,"Convert Submit PDU to GmmsMessage.");
 				}
-				result = processSubmit(msg);
+				final GmmsMessage finalMsg = msg;
+				processorHandler.getHandlerThreadPool().execute(new Runnable() {
+					public void run() {
+						processSubmit(finalMsg);
+					}
+				});
+				result = true;
 			}
 		} else if (Pdu.COMMAND_SUBMIT4MQM == pdu.getCommandId()) {
 			msg = pdu.convertToMsg(null);
@@ -192,7 +229,13 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
 				if(log.isDebugEnabled()){
 					log.debug(msg, "Convert Submit4MQM PDU to GmmsMessage:{}",msg.toString4NewMsg());
 				}
-				result = processSubmit4MQM(msg);
+				final GmmsMessage finalMsg = msg;
+				processorHandler.getHandlerThreadPool().execute(new Runnable() {
+					public void run() {
+						processSubmit4MQM(finalMsg);
+					}
+				});
+				result = true;
 			}
 		} else if (Pdu.COMMAND_SUBMIT_ACK == pdu.getCommandId()) {
 			msg = pdu.convertToMsg(outBuffer);
@@ -204,73 +247,20 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
 				result = processSubmitAck(msg);
 			}
 		} else if (Pdu.COMMAND_DELIVERY_REPORT == pdu.getCommandId()) {
+			metrics.incrementCounter("core.receive.dr");
 			msg = ((CommandDeliveryReport) pdu).convertToMsg(true);		
 			if(log.isInfoEnabled()){
 				log.info(msg, "Convert DeliveryReport PDU to GmmsMessage, and outmsgid is {} and statuscode is : {}"
 					      ,msg.getOutMsgID(), msg.getStatusCode());
 			}
-			GmmsMessage message = null;
-			
-			if (ctm.isInDRStoreMode(msg.getRSsID())
-					|| (isStoreDRModeEnable && gmmsUtility.isRunningStoreDRMode())) {
-				result = processStoredDeliveryReport(msg, pdu);
-			}
-			else{
-				if(isRedisEnable){
-					String object = redis.getString(msg.getOutMsgID());
-					if(object != null){
-						message = SerializableHandler.convertRedisMssage2GmmsMessage(object);
-						if(message!=null){
-							if (GmmsStatus.ACCEPT.getCode() ==msg.getStatus().getCode()) {
-								//didn't do anything							
-							}else {
-								String dateKey  = gmmsUtility.getRedisDateIn(message);
-								if(dateKey!=null){
-									redis.delPipeline(msg.getOutMsgID(),dateKey);
-								}else{
-									redis.del(msg.getOutMsgID());
-								}
-							}
-							
-						}			
-					}else{
-						if(log.isInfoEnabled()){
-							log.info("Can not find the message in redis, and out msg id is {}"
-									, msg.getOutMsgID());	
-						}
-						try {
-							message = msgStoreManager.getGmmsMessageByOutMsgID(msg.getOutMsgID());
-						} catch (DataManagerException e) {
-							log.error("Can not find the message in message Queue, and out msg id is {}"
-											,msg.getOutMsgID());
-						}
-					}
-					
-				}else{
-					try {
-						message = msgStoreManager.getGmmsMessageByOutMsgID(msg.getOutMsgID());
-					} catch (DataManagerException e) {
-						log.error("Can not find the message in message Queue, and out msg id is {}"
-										,msg.getOutMsgID());
-					}
-    			}
-				if(message != null){					
-					message.setMessageType(GmmsMessage.MSG_TYPE_DELIVERY_REPORT);
-//					message.setStatus(msg.getStatus());
-					message.setStatusCode(msg.getStatusCode());
-					if (!GmmsStatus.RETRIEVED.getText().equalsIgnoreCase(
-							message.getStatusText())) {
-						message.setStatusText(GmmsStatus.getStatus(msg.getStatusCode()).getText());
-					}
-					
-					message.setOutTransID(msg.getOutTransID());
-					message.setTransaction(msg.getTransaction());
-					message.setDeliveryChannel(msg.getDeliveryChannel());
-					result = processDeliveryReport(message, pdu);
-				} else {
-					result = processStoredDeliveryReport(msg, pdu);
+			final GmmsMessage finalMsg = msg;
+			final Pdu finalPdu = pdu;
+			processorHandler.getHandlerThreadPool().execute(new Runnable() {
+				public void run() {
+					handleInboundDRInternal(finalMsg, finalPdu);
 				}
-			}
+			});
+			result = true;
 		} else if (Pdu.COMMAND_DELIVERY_REPORT4MQM == pdu.getCommandId()) {
 			msg = pdu.convertToMsg(null);
 			if (msg == null) {
@@ -312,6 +302,7 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
 			}
 			result = processRESTDeliveryReportQuery(msg, pdu);
 		} else if (Pdu.COMMAND_DELIVERY_REPORT_ACK == pdu.getCommandId()) {
+			metrics.incrementCounter("core.receive.dr_ack");
 			msg = pdu.convertToMsg(outBuffer);
 			if (msg != null) {
 				if(log.isInfoEnabled()){
@@ -329,15 +320,6 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
 				}
 				result = processDeliveryReportQueryAck(msg);
 			}
-		} else if (Pdu.COMMAND_INNER_ACK == pdu.getCommandId()) {
-			msg = pdu.convertToMsg(inBuffer);
-			
-			if(log.isInfoEnabled()){
-				log.info(msg, "Receive InnerAck pdu:{}" , pdu);
-			}
-			if (msg != null) {
-				result = processInnerAck(msg);
-			}
 		} else if (Pdu.COMMAND_ALIVE == pdu.getCommandId()) {
 			CommandKeepAliveAck ack = new CommandKeepAliveAck();
 			sendPdu(ack);
@@ -349,6 +331,10 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
 				stop();
 			}
 		}
+		metrics.recordTime("core.receive", System.nanoTime() - _receiveStart);
+		// Report buffer utilization gauges
+		if (outBuffer != null) { metrics.setGauge("buffer.out." + sessionName, outBuffer.size()); }
+		if (inBuffer != null) { metrics.setGauge("buffer.in." + sessionName, inBuffer.size()); }
 		return result;
 	}
 
@@ -374,19 +360,24 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
 
 	public boolean submit(GmmsMessage message) {
 		boolean result = false;
+		long _submitStart = System.nanoTime();
 		if (GmmsMessage.MSG_TYPE_SUBMIT.equalsIgnoreCase(message
 				.getMessageType())) {
+			metrics.incrementCounter("core.send.submit");
 			result = sendNewMessage(message);
 		} else if (GmmsMessage.MSG_TYPE_DELIVERY_REPORT
 				.equalsIgnoreCase(message.getMessageType())) {
+			metrics.incrementCounter("core.send.dr");
 			result = sendReport(message);
 		} else if (GmmsMessage.MSG_TYPE_DELIVERY_REPORT_QUERY
 				.equalsIgnoreCase(message.getMessageType())) {
+			metrics.incrementCounter("core.send.dr_query");
 			result = sendReportQuery(message);
 		} else if (GmmsMessage.MSG_TYPE_SUBMIT_RESP.equalsIgnoreCase(message
 				.getMessageType())
 				|| (GmmsMessage.MSG_TYPE_DELIVERY_REPORT_RESP
 						.equalsIgnoreCase(message.getMessageType()))) {
+			metrics.incrementCounter("core.send.resp");
 			result = sendResp(message);
 		} else {
 			log.warn(message, "Unknown Message Type:"
@@ -394,6 +385,7 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
 			message.setStatus(GmmsStatus.UNKNOWN_ERROR);
 			msgStoreManager.handleMessageError(message);
 		}
+		metrics.recordTime("core.submit", System.nanoTime() - _submitStart);
 		return result;
 	}
 
@@ -482,16 +474,18 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
             	//long msg
             	//senderAddress has been replace
             	String msgid = message.getMsgID();
-            	synchronized (sync) {
-            		String redisSender = GmmsUtility.getInstance().getRedisClient().getString("senderReplacement_"+msgid);
-            		if (redisSender == null) {            	
-            			GmmsUtility.getInstance().getRedisClient().setString("senderReplacement_"+msgid, address[0], 60*60*24);
-            			pdu.setSender(address[0]);
-					}else {
-						pdu.setSender(redisSender);
-					}           		
-				}
-            	
+            	// 6.1 Optimization: replaced synchronized(sync) global lock with
+            	// atomic Redis SETNX. setnxString returns null if we set the key,
+            	// or the existing value if key already existed.
+            	String existingSender = GmmsUtility.getInstance().getRedisClient()
+            			.setnxString("senderReplacement_" + msgid, address[0], 60 * 60 * 24);
+            	if (existingSender == null) {
+            		// We set it — use our sender
+            		pdu.setSender(address[0]);
+            	} else {
+            		// Already existed — use the stored sender
+            		pdu.setSender(existingSender);
+            	}
             }else {
             	pdu.setSender(address[0]);
 			}            
@@ -588,23 +582,23 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
             return result;
         }
 
-        // 6.2 Optimization: replaced infinite busy-wait with bounded retry + backoff
-     		String bufferKey = message.getMsgID() + message.getSarSegmentSeqNum();
-     		int retries = 0;
-     		while (!outBuffer.put(bufferKey, message)) {
-     			if (++retries > 5000) {
-     				log.warn(message, "outBuffer full after 5000 retries, failing message");
-     				message.setStatus(GmmsStatus.COMMUNICATION_ERROR);
-     				msgStoreManager.handleOutSubmitRes(message);
-     				return result;
-     			}
-     			try { Thread.sleep(1); } catch (InterruptedException ie) {
-     				log.warn(message, "outBuffer put interrupted, failing message");
-     				message.setStatus(GmmsStatus.COMMUNICATION_ERROR);
-     				msgStoreManager.handleOutSubmitRes(message);
-     				return result;
-     			}
-     	}
+		// 6.2 Optimization: replaced infinite busy-wait with bounded retry + backoff
+		String bufferKey = message.getMsgID() + message.getSarSegmentSeqNum();
+		int retries = 0;
+		while (!outBuffer.put(bufferKey, message)) {
+			if (++retries > 5000) {
+				log.warn(message, "outBuffer full after 5000 retries, failing message");
+				message.setStatus(GmmsStatus.COMMUNICATION_ERROR);
+				msgStoreManager.handleOutSubmitRes(message);
+				return result;
+			}
+			try { Thread.sleep(1); } catch (InterruptedException ie) {
+				log.warn(message, "outBuffer put interrupted, failing message");
+				message.setStatus(GmmsStatus.COMMUNICATION_ERROR);
+				msgStoreManager.handleOutSubmitRes(message);
+				return result;
+			}
+		}
         try {
             super.submit(submitBuffer.getBuffer());
             message.setOutTransID(String.valueOf(System.currentTimeMillis()));
@@ -722,7 +716,7 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
         }
 
         try {
-        	// 6.2 Optimization: bounded retry for DR buffer put
+            // 6.2 Optimization: bounded retry for DR buffer put
             String drBufKey = message.getInMsgID()+"_"+message.getStatusText();
             int drRetries = 0;
             while (!outBuffer.put(drBufKey, message)) {
@@ -796,21 +790,21 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
         }
 
         try {
-        	// 6.2 Optimization: bounded retry for DRQuery buffer put
+            // 6.2 Optimization: bounded retry for DRQuery buffer put
             int drqRetries = 0;
             while (!outBuffer.put(message.getMsgID(), message)) {
-            	 if (++drqRetries > 5000) {
-                     log.warn(message, "outBuffer full after 5000 retries for DRQuery, failing message");
-                     message.setStatusCode(GmmsStatus.FAIL_QUERY_DELIVERREPORT.getCode());
-                     msgStoreManager.handleOutDeliveryReportRes(message);
-                     return result;
-                 }
-                 try { Thread.sleep(1); } catch (InterruptedException ie) {
-                     log.warn(message, "DRQuery outBuffer put interrupted, failing message");
-                     message.setStatusCode(GmmsStatus.FAIL_QUERY_DELIVERREPORT.getCode());
-                     msgStoreManager.handleOutDeliveryReportRes(message);
-                     return result;
-                 }
+                if (++drqRetries > 5000) {
+                    log.warn(message, "outBuffer full after 5000 retries for DRQuery, failing message");
+                    message.setStatusCode(GmmsStatus.FAIL_QUERY_DELIVERREPORT.getCode());
+                    msgStoreManager.handleOutDeliveryReportRes(message);
+                    return result;
+                }
+                try { Thread.sleep(1); } catch (InterruptedException ie) {
+                    log.warn(message, "DRQuery outBuffer put interrupted, failing message");
+                    message.setStatusCode(GmmsStatus.FAIL_QUERY_DELIVERREPORT.getCode());
+                    msgStoreManager.handleOutDeliveryReportRes(message);
+                    return result;
+                }
             }
             super.submit(reportBuffer.getBuffer());
             result = true;
@@ -1173,6 +1167,174 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
     	}
         return result;
     }
+
+    /**
+     * V4.0 Stream Path Entry Point
+     * 供 MTStreamConsumer 调用：从 Redis Stream 消费到消息后，执行与 TCP 路径
+     * (processSuccessSubmit / processErrorSubmit) 完全相同的业务检查逻辑，
+     * 但不使用 inBuffer + sendPdu(ack)，因为所有消息均走 Stream，Core 不再需要
+     * 通过 TCP 向 Function 模块发送 CommandSubmitAck。
+     */
+    public boolean processSubmitFromStream(GmmsMessage msg) {
+    	boolean result = false;
+    	if (msg.getStatusCode() < 0) {
+    		result = processSuccessSubmitFromStream(msg);
+    	} else {
+    		msg.setStatusText(GmmsStatus.getStatus(msg.getStatusCode()).getText());
+    		// Error path: processErrorSubmit 内部会调 sendPdu(ack) 给 TCP 方向，
+    		// Stream 路径下 Core 无 TCP 连接，sendPdu 会返回 false 但不影响业务。
+    		// 对于 HTTP(Common) 协议，错误 DR 会正常通过 msgStoreManager 发出。
+    		// 对于 SMPP 协议（来自 Stream），忽略 sendPdu 失败，只要 CDR 和错误 DR 正常处理即可。
+    		result = processErrorSubmitFromStream(msg);
+    	}
+    	return result;
+    }
+
+    /**
+     * V4.0 内部辅助方法：Stream 路径成功提交处理
+     * 与 processSuccessSubmit 逻辑完全一致，但最终将 inBuffer + sendPdu(ack) 替换为
+     * 直接调用 processInnerAck，实现无 TCP 反馈的业务路由。
+     */
+    private boolean processSuccessSubmitFromStream(GmmsMessage msg) {
+        msg.setOriginalSenderAddr(msg.getSenderAddress());
+        A2PCustomerInfo cst = ctm.getCustomerBySSID(msg.getOSsID());
+        if (cst == null) {
+        	log.warn(msg, "processSuccessSubmitFromStream: customer not found for OSsID={}", msg.getOSsID());
+        	return false;
+        }
+        if (cst.isSmsOptionSendFakeDR() && msg.getDeliveryReport()) {
+    		msg.setFakeDR(true);
+    	}
+        String[] address = new String[] { msg.getSenderAddress(), msg.getRecipientAddress() };
+        this.handleCommonPrefix4MO(address, cst);
+        if (address[0] == null || "".equalsIgnoreCase(address[0])) {
+        	msg.setSenderAddress("abc");
+        } else {
+        	msg.setSenderAddress(address[0]);
+        }
+        msg.setRecipientAddress(address[1]);
+        msg.setInClientPull(cst.getInClientPull());
+
+        // 1. 黑名单/白名单/内容检查（与 processSuccessSubmit 逻辑一致，错误时直接 return）
+        if (!"VIP".equalsIgnoreCase(cst.getCustomerTypeBySender())) {
+        	String recipientAddress = msg.getRecipientAddress();
+        	if (recipientAddress.startsWith("+")) recipientAddress = recipientAddress.substring(1);
+        	if (recipientAddress.startsWith("00")) recipientAddress = recipientAddress.substring(2);
+        	if (recipientAddress.startsWith("0")) recipientAddress = recipientAddress.substring(1);
+
+        	if ("NonPA".equalsIgnoreCase(cst.getCustomerTypeBySender()) && recipientAddress.startsWith("65")) {
+        		if (ctm.doSenderBlacklistCheck(-1, msg)) {
+        			gmmsUtility.getCdrManager().logInSubmit(msg);
+        			if (msg.getDeliveryReport()) { msg.setMessageType(GmmsMessage.MSG_TYPE_DELIVERY_REPORT); msg.setRSsID(msg.getOSsID()); msg.setStatus(GmmsStatus.REJECTED_SDBL); msgStoreManager.sendDRMessageForServerReject(msg); }
+        			return true;
+        		}
+        	} else {
+        		if (!ctm.doSenderBlacklistCheck(msg.getOSsID(), msg)) {
+        			if (ctm.doSenderBlacklistCheck(-1, msg)) {
+        				gmmsUtility.getCdrManager().logInSubmit(msg);
+        				if (msg.getDeliveryReport()) { msg.setMessageType(GmmsMessage.MSG_TYPE_DELIVERY_REPORT); msg.setRSsID(msg.getOSsID()); msg.setStatus(GmmsStatus.REJECTED_SDBL); msgStoreManager.sendDRMessageForServerReject(msg); }
+        				return true;
+        			}
+        		} else {
+        			gmmsUtility.getCdrManager().logInSubmit(msg);
+        			if (msg.getDeliveryReport()) { msg.setMessageType(GmmsMessage.MSG_TYPE_DELIVERY_REPORT); msg.setRSsID(msg.getOSsID()); msg.setStatus(GmmsStatus.REJECTED_SDBL); msgStoreManager.sendDRMessageForServerReject(msg); }
+        			return true;
+        		}
+        	}
+        	if (!ctm.doSenderWhitelistCheck(msg.getOSsID(), msg)) {
+        		gmmsUtility.getCdrManager().logInSubmit(msg);
+        		if (msg.getDeliveryReport()) { msg.setMessageType(GmmsMessage.MSG_TYPE_DELIVERY_REPORT); msg.setRSsID(msg.getOSsID()); msg.setStatus(GmmsStatus.REJECTED_SDWL); msgStoreManager.sendDRMessageForServerReject(msg); }
+        		return true;
+        	}
+        }
+        if (!ctm.doContentBlacklistCheck(msg.getOSsID(), msg)) {
+        	if (ctm.doContentBlacklistCheck(-1, msg)) {
+        		gmmsUtility.getCdrManager().logInSubmit(msg);
+        		if (msg.getDeliveryReport()) { msg.setMessageType(GmmsMessage.MSG_TYPE_DELIVERY_REPORT); msg.setRSsID(msg.getOSsID()); msg.setStatus(GmmsStatus.REJECTED_CTBL); msgStoreManager.sendDRMessageForServerReject(msg); }
+        		return true;
+        	}
+        } else {
+        	gmmsUtility.getCdrManager().logInSubmit(msg);
+        	if (msg.getDeliveryReport()) { msg.setMessageType(GmmsMessage.MSG_TYPE_DELIVERY_REPORT); msg.setRSsID(msg.getOSsID()); msg.setStatus(GmmsStatus.REJECTED_CTBL); msgStoreManager.sendDRMessageForServerReject(msg); }
+        	return true;
+        }
+
+        // 2. 高级发件人替换
+        try {
+        	if (!cst.isNeedSupportBlackList() || (gmmsUtility.preBlackListCheck(msg) && cst.isNeedSupportBlackList())) {
+        		if (cst.isSmsOptionAdvancedSenderReplacement()) ctm.doSenderAddressReplace(msg.getOSsID(), msg);
+        	}
+        } catch (Exception e) {
+        	log.error("do sender replace in ocustomer failed", e);
+        }
+
+        // 3. 过期时间设定
+        if (msg.getExpiryDate() == null) {
+        	java.util.TimeZone local = java.util.TimeZone.getDefault();
+        	long now = new java.util.Date().getTime();
+        	long diff = local.getRawOffset();
+        	if (local.inDaylightTime(new java.util.Date(now))) diff += local.getDSTSavings();
+        	long gmtNow = now - diff;
+        	int expireTime = gmmsUtility.getExpireTimeInMinute();
+        	if (cst.getExpireTime() > 0) expireTime = cst.getExpireTime();
+        	else if (cst.getFinalExpireTime() > 0) expireTime = cst.getFinalExpireTime() * 3 / 4;
+        	msg.setExpiryDate(new java.util.Date(gmtNow + expireTime * 60 * 1000));
+        }
+
+        // 4. CSM / prepareInSubmit
+        if (gmmsUtility.preCheckMessage(msg)) {
+        	csm.processGMMS(msg);
+        	msgStoreManager.prepareInSubmit(msg);
+        	gmmsUtility.afterCheckMessage(msg);
+        }
+
+        // 5. 业务路由 — 直接调 processInnerAck，不走 inBuffer + TCP sendPdu(ack)
+        try {
+        	if (msg.getStatus().getCode() == GmmsStatus.UNASSIGNED.getCode()) {
+        		processInnerAck(msg);
+        	} else {
+        		gmmsUtility.getCdrManager().logInSubmit(msg);
+        		if (msg.getDeliveryReport()) {
+        			msg.setMessageType(GmmsMessage.MSG_TYPE_DELIVERY_REPORT);
+        			msg.setRSsID(msg.getOSsID());
+        			GmmsStatus converDRStatus = GmmsStatus.SubmitConvertErrorDRStatus(msg.getStatusText());
+        			msg.setStatus(converDRStatus != null ? converDRStatus : GmmsStatus.REJECTED);
+        			msgStoreManager.sendDRMessageForServerReject(msg);
+        		}
+        	}
+        } catch (Exception e) {
+        	log.warn(msg, "processSuccessSubmitFromStream error", e);
+        }
+        return true;
+    }
+
+    /**
+     * V4.0 内部辅助方法：Stream 路径错误提交处理
+     * 与 processErrorSubmit 逻辑一致，对 HTTP 协议正常走 sendDRMessage，
+     * 对 SMPP（Stream）协议直接写 CDR+DR，忽略 TCP sendPdu(ack)。
+     */
+    private boolean processErrorSubmitFromStream(GmmsMessage msg) {
+        if (GmmsMessage.MSG_TYPE_SUBMIT.equalsIgnoreCase(msg.getMessageType())) {
+        	gmmsUtility.getCdrManager().logInSubmit(msg);
+        } else {
+        	gmmsUtility.getCdrManager().logInDelivery(msg);
+        }
+        A2PCustomerInfo cst = ctm.getCustomerBySSID(msg.getOSsID());
+        if (cst != null && cst.isSmsOptionSendFakeDR() && msg.getDeliveryReport()) {
+        	msg.setFakeDR(true);
+        }
+        // 对 HTTP 协议保持发送错误 DR
+        if (cst != null && !cst.getProtocol().startsWith("SMPP") && msg.getDeliveryReport()
+                && GmmsMessage.MSG_TYPE_SUBMIT.equalsIgnoreCase(msg.getMessageType())) {
+        	msg.setMessageType(GmmsMessage.MSG_TYPE_DELIVERY_REPORT);
+        	msg.setRSsID(msg.getOSsID());
+        	msg.setOA2P(ctm.getCurrentA2P());
+        	msg.setTransaction(transaction);
+        	msgStoreManager.sendDRMessage(msg);
+        }
+        // SMPP Stream 路径：不尝试 TCP sendPdu，直接返回 true
+        return true;
+    }
     /**
      * 
      * @param msg
@@ -1232,24 +1394,26 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
 					processInnerAck(msg);	        		
 				}else{
 					result = sdqManager.insertSDQMessage(msg);
-					CommandDeliveryReportAck ack = new CommandDeliveryReportAck();
-					CommandDeliveryReport reportPdu = (CommandDeliveryReport) pdu;
-					ack.setMsgId(reportPdu.getMsgId());
-					ack.setCustMsgId(reportPdu.getMsgId());
-					ack.setTransactionId(reportPdu.getTransactionId());
-					ack.setR_relay(reportPdu.getR_relay());
-					ack.setO_relay(reportPdu.getO_relay());
-					ack.setC_hub(reportPdu.getC_hub());
-					ack.setO_hub(reportPdu.getO_hub());
-					ack.setR_hub(reportPdu.getR_hub());
-					ack.setTransaction(reportPdu.getTransaction());
-					if (result) {
-						ack.setStatusCode(0);
-					} else {
-						ack.setStatusCode(1);
-					}
+					if (pdu != null && pdu instanceof CommandDeliveryReport) {
+						CommandDeliveryReportAck ack = new CommandDeliveryReportAck();
+						CommandDeliveryReport reportPdu = (CommandDeliveryReport) pdu;
+						ack.setMsgId(reportPdu.getMsgId());
+						ack.setCustMsgId(reportPdu.getMsgId());
+						ack.setTransactionId(reportPdu.getTransactionId());
+						ack.setR_relay(reportPdu.getR_relay());
+						ack.setO_relay(reportPdu.getO_relay());
+						ack.setC_hub(reportPdu.getC_hub());
+						ack.setO_hub(reportPdu.getO_hub());
+						ack.setR_hub(reportPdu.getR_hub());
+						ack.setTransaction(reportPdu.getTransaction());
+						if (result) {
+							ack.setStatusCode(0);
+						} else {
+							ack.setStatusCode(1);
+						}
 
-					sendPdu(ack);
+						sendPdu(ack);
+					}
 				}
 				
 			}
@@ -1265,10 +1429,7 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
 	private boolean processDeliveryReport(GmmsMessage msg, Pdu pdu) {
 		boolean result = false;
 		try {
-			CommandDeliveryReportAck ack = new CommandDeliveryReportAck();
-			CommandDeliveryReport reportPdu = (CommandDeliveryReport) pdu;
 			A2PCustomerInfo vdc = ctm.getCustomerBySSID(msg.getRSsID());
-			
 			
 			if (msg != null) {
 				msg.setInnerTransaction(transaction);
@@ -1306,17 +1467,21 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
 					}
 				}	*/																									
 			} else {
-				ack.setMsgId(reportPdu.getMsgId());
-				ack.setCustMsgId(reportPdu.getMsgId());
-				ack.setTransactionId(reportPdu.getTransactionId());
-				ack.setR_relay(reportPdu.getR_relay());
-				ack.setO_relay(reportPdu.getO_relay());
-				ack.setC_hub(reportPdu.getC_hub());
-				ack.setO_hub(reportPdu.getO_hub());
-				ack.setR_hub(reportPdu.getR_hub());
-				ack.setStatusCode(0);
-				ack.setTransaction(reportPdu.getTransaction());
-				sendPdu(ack);
+				if (pdu != null && pdu instanceof CommandDeliveryReport) {
+					CommandDeliveryReportAck ack = new CommandDeliveryReportAck();
+					CommandDeliveryReport reportPdu = (CommandDeliveryReport) pdu;
+					ack.setMsgId(reportPdu.getMsgId());
+					ack.setCustMsgId(reportPdu.getMsgId());
+					ack.setTransactionId(reportPdu.getTransactionId());
+					ack.setR_relay(reportPdu.getR_relay());
+					ack.setO_relay(reportPdu.getO_relay());
+					ack.setC_hub(reportPdu.getC_hub());
+					ack.setO_hub(reportPdu.getO_hub());
+					ack.setR_hub(reportPdu.getR_hub());
+					ack.setStatusCode(0);
+					ack.setTransaction(reportPdu.getTransaction());
+					sendPdu(ack);
+				}
 			}
 			result = true;
 		} catch (Exception e) {
@@ -1325,6 +1490,74 @@ public class InternalCoreEngineSession extends AbstractInternalSession{
 			result = false;
 		}
 		return result;
+	}
+
+	/**
+	 * V4.5 Reactive DR Entry Point
+	 * Shared logic between TCP path and Redis Stream path
+	 */
+	public void handleInboundDRInternal(GmmsMessage finalMsg, Pdu finalPdu) {
+		GmmsMessage message = null;
+		
+		if (ctm.isInDRStoreMode(finalMsg.getRSsID())
+				|| (isStoreDRModeEnable && gmmsUtility.isRunningStoreDRMode())) {
+			processStoredDeliveryReport(finalMsg, finalPdu);
+		}
+		else{
+			if(isRedisEnable){
+				String object = redis.getString(finalMsg.getOutMsgID());
+				if(object != null){
+					message = SerializableHandler.convertRedisMssage2GmmsMessage(object);
+					if(message!=null){
+						if (GmmsStatus.ACCEPT.getCode() ==finalMsg.getStatus().getCode()) {
+							//didn't do anything							
+						}else {
+							String dateKey  = gmmsUtility.getRedisDateIn(message);
+							if(dateKey!=null){
+								redis.delPipeline(finalMsg.getOutMsgID(),dateKey);
+							}else{
+								redis.del(finalMsg.getOutMsgID());
+							}
+						}
+						
+					}			
+				}else{
+					if(log.isInfoEnabled()){
+						log.info("Can not find the message in redis, and out msg id is {}"
+								, finalMsg.getOutMsgID());	
+					}
+					try {
+						message = msgStoreManager.getGmmsMessageByOutMsgID(finalMsg.getOutMsgID());
+					} catch (DataManagerException e) {
+						log.error("Can not find the message in message Queue, and out msg id is {}"
+										,finalMsg.getOutMsgID());
+					}
+				}
+				
+			}else{
+				try {
+					message = msgStoreManager.getGmmsMessageByOutMsgID(finalMsg.getOutMsgID());
+				} catch (DataManagerException e) {
+					log.error("Can not find the message in message Queue, and out msg id is {}"
+									,finalMsg.getOutMsgID());
+				}
+			}
+			if(message != null){					
+				message.setMessageType(GmmsMessage.MSG_TYPE_DELIVERY_REPORT);
+				message.setStatusCode(finalMsg.getStatusCode());
+				if (!GmmsStatus.RETRIEVED.getText().equalsIgnoreCase(
+						message.getStatusText())) {
+					message.setStatusText(GmmsStatus.getStatus(finalMsg.getStatusCode()).getText());
+				}
+				
+				message.setOutTransID(finalMsg.getOutTransID());
+				message.setTransaction(finalMsg.getTransaction());
+				message.setDeliveryChannel(finalMsg.getDeliveryChannel());
+				processDeliveryReport(message, finalPdu);
+			} else {
+				processStoredDeliveryReport(finalMsg, finalPdu);
+			}
+		}
 	}
 
 

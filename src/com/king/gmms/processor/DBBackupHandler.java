@@ -8,6 +8,7 @@ import com.king.gmms.threadpool.ThreadPoolProfileBuilder;
 import com.king.message.gmms.GmmsMessage;
 import com.king.message.gmms.GmmsStatus;
 import com.king.message.gmms.MessageStoreManager;
+import com.king.gmms.metrics.MetricsCollector;
 
 public class DBBackupHandler extends ProcessorHandler{
 	
@@ -66,6 +67,7 @@ public class DBBackupHandler extends ProcessorHandler{
 		}
 		try {
 			handlerThreadPool.execute(new DBBackupThread(message));
+			MetricsCollector.getInstance().incrementCounter("dbbackup.putMsg");
 			ret = true;
 		} catch(Exception e) {
 			if (log.isInfoEnabled()) {

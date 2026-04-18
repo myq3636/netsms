@@ -589,19 +589,18 @@ public abstract class HttpSession extends Session {
 						.equalsIgnoreCase(msg.getMessageType())
 				|| GmmsMessage.MSG_TYPE_DELIVERY_REPORT_QUERY_RESP
 						.equalsIgnoreCase(msg.getMessageType())) {
-			TransactionURI innerTransaction = msg.getInnerTransaction();
 			if (innerTransaction == null) {
 				if(log.isInfoEnabled()){
 					log.info(msg, "Cannot get the inner transaction");
 				}
 				return false;
 			}
-			routerQueue = innerTransaction.getConnectionName();
-			msgQueue = factory.getMessageQueue(msg, routerQueue);
-			if(log.isInfoEnabled()){
-				log.info(msg, "Send {} to {}",msg.getMessageType(), routerQueue);
+			
+			// V4.1 Redirect all responses to Redis Results Stream
+			if (log.isInfoEnabled()) {
+				log.info(msg, "Sending {} to Redis results stream", msg.getMessageType());
 			}
-			deliveryChannelQueue = routerQueue;
+			return com.king.gmms.messagequeue.StreamQueueManager.getInstance().produceResult(msg);
 		} else {
 			routerQueue = moduleManager.selectRouter(msg);
 			msgQueue = factory.getMessageQueue(msg, routerQueue);

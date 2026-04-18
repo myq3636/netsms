@@ -27,6 +27,7 @@ import com.king.gmms.protocol.commonhttp.CommonMessageRESTXmlHttpHandler;
 import com.king.gmms.protocol.commonhttp.HttpStatus;
 import com.king.message.gmms.GmmsMessage;
 import com.king.message.gmms.GmmsStatus;
+import com.king.gmms.messagequeue.StreamQueueManager;
 import com.king.message.gmms.MessageIdGenerator;
 
 /**
@@ -225,13 +226,6 @@ public class CommonRESTHttpServlet extends AbstractHttpServer {
 				o.write(respContent.getBytes());
 			}
 			o.flush();
-
-			msg.setMessageType(GmmsMessage.MSG_TYPE_INNER_ACK);
-			putGmmsMessage2RouterQueue(msg);
-
-			synchronized (responseParameter) {
-				responseParameter.notifyAll();
-			}
 		} catch (Exception e) {
 			log.error(e, e);
 		} finally {
@@ -303,23 +297,21 @@ public class CommonRESTHttpServlet extends AbstractHttpServer {
 
 		if (hi != null) {
 			if (hi.isSuccessMessageStatus(hs)) {
-				factory.putServletParam(message.getMsgID(), responseParameter);
-				if (!putGmmsMessage2RouterQueue(message)) {
+				// V4.4 Fast Accept: Directly produce to Redis Stream and respond immediately
+				boolean enqueued = StreamQueueManager.getInstance().produceSubmitMessage(message);
+				if (!enqueued) {
 					message.setStatus(GmmsStatus.INSUBMIT_RESP_FAILED);
 					gmmsUtility.getCdrManager().logInSubmit(message);
 					this.response(
 							interfaceName,
 							hi.mapGmmsStatus2HttpSubStatus(GmmsStatus.UNKNOWN_ERROR),
 							message, request, response);
-					factory.removeServlet(message.getMsgID());
 				} else {
-					try {
-						synchronized (responseParameter) {
-							responseParameter.wait(timeout);
-						}
-					} catch (Exception e) {
-						log.warn(message, "Fail to waiting for the response");
-					}
+					// Enqueue success, return SUCCESS immediately
+					message.setStatus(GmmsStatus.SUCCESS);
+					this.response(interfaceName, 
+							hi.mapGmmsStatus2HttpSubStatus(GmmsStatus.SUCCESS), 
+							message, request, response);
 				}
 			} else {// isn't a success response
 				message.setStatus(hi.mapHttpSubStatus2GmmsStatus(hs));
@@ -401,48 +393,28 @@ public class CommonRESTHttpServlet extends AbstractHttpServer {
 
 			if (hi.isSuccessMessageStatus(hs)) {
 
-				synchronized (responseParameter) {
-					for (GmmsMessage msg : msgSet) {
-						factory.putServletParam(msg.getMsgID(),
-								responseParameter);
-
-						if (!putGmmsMessage2RouterQueue(msg)) {
-							msg.setStatus(GmmsStatus.INSUBMIT_RESP_FAILED);
-							gmmsUtility.getCdrManager().logInSubmit(msg);
-							responseParameter.getRecipientMsgMap().put(
-									msg.getRecipientAddress(), msg);
-
-							failedCount++;
-						} else {
-							successCount++;
-						}
-					}
-					if (failedCount > 0 && failedCount == msgSet.size()) {
-						// map hs status accourding to gmmsStatus inside
-						// response
-						// method
-						for (GmmsMessage msg : msgSet) {
-							msg.setStatus(GmmsStatus.INSUBMIT_RESP_FAILED);
-							gmmsUtility.getCdrManager().logInSubmit(msg);
-						}
-						this.response(
-								interfaceName,
-								hi.mapGmmsStatus2HttpSubStatus(GmmsStatus.UNKNOWN_ERROR),
-								msgSet, request, response);
-						for (GmmsMessage msg : msgSet) {
-							factory.removeServlet(msg.getMsgID());
-						}
+				for (GmmsMessage msg : msgSet) {
+					if (!StreamQueueManager.getInstance().produceSubmitMessage(msg)) {
+						msg.setStatus(GmmsStatus.INSUBMIT_RESP_FAILED);
+						gmmsUtility.getCdrManager().logInSubmit(msg);
+						failedCount++;
 					} else {
-						try {
-							CountDownLatch cdl = new CountDownLatch(
-									successCount);
-							responseParameter.setCdl(cdl);
-							responseParameter.wait(timeout);
-
-						} catch (Exception e) {
-							log.warn("Fail to waiting for the response");
-						}
+						successCount++;
 					}
+				}
+				if (failedCount > 0 && failedCount == msgSet.size()) {
+					// all failed
+					this.response(
+							interfaceName,
+							hi.mapGmmsStatus2HttpSubStatus(GmmsStatus.UNKNOWN_ERROR),
+							msgSet, request, response);
+				} else {
+					// partial or all success: return SUCCESS
+					// Note: client will get MsgIDs in the response and can query status later via DR or Query API
+					this.response(
+							interfaceName,
+							hi.mapGmmsStatus2HttpSubStatus(GmmsStatus.SUCCESS),
+							msgSet, request, response);
 				}
 
 			} else {// isn't a success response
@@ -563,14 +535,6 @@ public class CommonRESTHttpServlet extends AbstractHttpServer {
 				o.write(respContent.getBytes());
 			}
 			o.flush();
-
-			for (GmmsMessage message : msgSet) {
-				message.setMessageType(GmmsMessage.MSG_TYPE_INNER_ACK);
-				putGmmsMessage2RouterQueue(message);
-			}
-			synchronized (responseParameter) {
-				responseParameter.notifyAll();
-			}
 
 		} catch (Exception e) {
 			log.error(e, e);

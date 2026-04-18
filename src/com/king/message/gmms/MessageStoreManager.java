@@ -76,6 +76,10 @@ public class MessageStoreManager extends DataManager {
 	private RedisClient redis = null;
 	private String module = null;
 	private IOSMSRerouteDispatcher rerouteDispatcher = null;
+	private static final int SQL_BATCH_SIZE = 500;
+	private static final long SQL_MAX_WAIT_MS = 200L;
+	private final java.util.concurrent.BlockingQueue<String> asyncSqlQueue = new java.util.concurrent.LinkedBlockingQueue<String>(50000);
+	private volatile boolean runAsyncWriter = false;
 
 	/**
 	 * Creates a new gmmsUtility of MessageQueueManager
@@ -110,6 +114,8 @@ public class MessageStoreManager extends DataManager {
 		}
 		module = System.getProperty("module");
 		rerouteDispatcher = new IOSMSRerouteDispatcher();
+		runAsyncWriter = true;
+		new AsyncSqlWriterThread().start();
 	}
 
 	/**
@@ -283,6 +289,67 @@ public class MessageStoreManager extends DataManager {
 				} catch (Exception e) {
 					log.error(e, e);
 				}
+			}
+		}
+	}
+
+	class AsyncSqlWriterThread extends Thread {
+		public void start() {
+			Thread thread = new Thread(A2PThreadGroup.getInstance(), this, "AsyncSqlWriterThread");
+			thread.start();
+			log.info("AsyncSqlWriterThread Thread start.");
+		}
+
+		public void run() {
+			java.util.List<String> batch = new java.util.ArrayList<String>();
+			long lastExecuteTime = System.currentTimeMillis();
+			while (runAsyncWriter || !asyncSqlQueue.isEmpty()) {
+				try {
+					String sql = asyncSqlQueue.poll(10, java.util.concurrent.TimeUnit.MILLISECONDS);
+					if (sql != null) {
+						batch.add(sql);
+					}
+					
+					long now = System.currentTimeMillis();
+					if (batch.size() >= SQL_BATCH_SIZE || (batch.size() > 0 && (now - lastExecuteTime) >= SQL_MAX_WAIT_MS)) {
+						executeBatch(batch);
+						batch.clear();
+						lastExecuteTime = now;
+					}
+				} catch (InterruptedException ie) {
+					// Ignore InterruptedException and let loop continue
+				} catch (Exception e) {
+					log.error("Error in AsyncSqlWriterThread loop", e);
+				}
+			}
+		}
+		
+		private void executeBatch(java.util.List<String> batch) {
+			java.sql.Statement stmt = null;
+			org.hibernate.Session sess = null;
+			try {
+				sess = currentSession();
+				java.sql.Connection conn = sess.connection();
+				boolean originalAutoCommit = conn.getAutoCommit();
+				
+				conn.setAutoCommit(false);
+				stmt = conn.createStatement();
+				for (String sql : batch) {
+					stmt.addBatch(sql);
+				}
+				stmt.executeBatch();
+				conn.commit();
+				conn.setAutoCommit(originalAutoCommit);
+			} catch (Exception e) {
+				log.error("Error executing batch update of size " + batch.size(), e);
+				if (!e.getMessage().contains("Data truncated") && !e.getMessage().contains("SQL syntax")) {
+					MailSender.getInstance().sendAlertMail("A2P DB Batch Exception", e);
+				}
+			} finally {
+				if (stmt != null) {
+					try { stmt.close(); } catch (java.sql.SQLException ex) {}
+				}
+				closeSession();
 			}
 		}
 	}
@@ -1771,13 +1838,16 @@ public class MessageStoreManager extends DataManager {
 		try {
 			if (message.getMimeMultiPartData() == null
 					&& message.getUdh() == null) {
-				doInsert(strSQL);
+				if (!asyncSqlQueue.offer(strSQL)) {
+					doInsert(strSQL);
+				}
 			} else {
 				strSQL = strSQL + ",Payload=?, UDH = ?";
 				PreparedStatement ps = this.getCon().prepareStatement(strSQL);
 				ps.setBytes(1, message.getMimeMultiPartData());
 				ps.setBytes(2, message.getUdh());
 				ps.executeUpdate();
+				try { ps.close(); } catch (Exception e) {}
 			}
 			if (log.isDebugEnabled()) {
 				log.debug(message, "inserted into {}", table);
@@ -3121,7 +3191,9 @@ public class MessageStoreManager extends DataManager {
 		}
 
 		try {
-			doUpdate(sqlStr);
+			if (!asyncSqlQueue.offer(sqlStr)) {
+				doUpdate(sqlStr);
+			}
 		} catch (Exception ex) {
 			log.error(message, "Error in executing:" + sqlStr, ex);
 			if (!ex.getMessage().contains("Data truncated")

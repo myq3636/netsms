@@ -305,6 +305,25 @@ public class RedisMonitor extends Observable implements Runnable,
 			master_pool = new JedisPool(config,master_host,master_port);
 			slave_pool = new JedisPool(config,slave_host,slave_port);
 		}
+
+		try {
+			Jedis tempJedis = master_pool.getResource();
+			try {
+				java.util.List<String> policy = tempJedis.configGet("maxmemory-policy");
+				if (policy != null && policy.size() > 1) {
+					if (!"noeviction".equals(policy.get(1))) {
+						log.error("Phase 1 Configuration Alert: Redis maxmemory-policy is currently set to [" + policy.get(1) + "], NOT 'noeviction'. Please alter this setting to prevent unintentional message eviction in stream mode!");
+					}
+				}
+			} finally {
+				if (tempJedis != null) {
+					master_pool.returnResource(tempJedis);
+				}
+			}
+		} catch (Exception e) {
+			log.error("Failed to check maxmemory-policy for master pool during RedisMonitor start", e);
+		}
+
 		Thread thread = new Thread(this);
 		thread.start();
 	}

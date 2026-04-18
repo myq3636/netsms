@@ -65,6 +65,7 @@ import com.king.gmms.customerconnectionfactory.SslSmppClientFactory;
 import com.king.gmms.ha.ModuleURI;
 import com.king.gmms.protocol.commonhttp.HttpUtils;
 import com.king.gmms.protocol.tcp.ByteBuffer;
+import com.king.gmms.throttle.DistributedThrottlingManager;
 import com.king.gmms.throttle.ThrottlingControl;
 import com.king.gmms.util.SystemConstants;
 import com.king.message.gmms.GmmsMessage;
@@ -2937,6 +2938,7 @@ public class A2PCustomerManager implements LifecycleListener {
 				// reload for sessions
 				this.reloadConnectionManagement(block.getSSID());
 				this.createCustomerSessions(block);
+				DistributedThrottlingManager.getInstance().updateRate(ssid, newBlock.getOutgoingThrottlingNum());
 //				RetryPolicyManager.getInstance().updateRetryPolicy(block.getSSID());
 				rmShortName.remove(shortName);
 				if ("partition".equalsIgnoreCase(newBlock.getString("A2PPlayerType"))) {

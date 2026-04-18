@@ -12,6 +12,7 @@ import com.king.gmms.customerconnectionfactory.*;
 import com.king.gmms.domain.A2PCustomerInfo;
 import com.king.gmms.domain.ModuleManager;
 import com.king.gmms.listener.*;
+import com.king.gmms.messagequeue.DRStreamConsumer;
 import com.king.gmms.routing.ADSServerMonitor;
 
 /**
@@ -99,7 +100,16 @@ public class MultiSmppServer
             		log.info("going to listen in the context of current thread.");
                 run();
             }
-                log.info( "{} starting...",module);
+            log.info( "{} starting...",module);
+            // V4.0 Start DR Consumer
+            DRStreamConsumer.getInstance().start();
+            
+            // V4.0 Register node for failover discovery
+            try {
+                gmmsUtility.getRedisClient().getStateRedis().sadd("system:server:nodes", gmmsUtility.getNodeId());
+            } catch (Exception e) {
+                log.warn("Fail to register node in Redis: {}", e.getMessage());
+            }
             return true;
         }
         catch (Exception ex) {
@@ -140,6 +150,8 @@ public class MultiSmppServer
         }
         finally {
             running = false;
+            // V4.0 Stop DR Consumer
+            DRStreamConsumer.getInstance().stop();
         }
         return true;
     }

@@ -90,6 +90,13 @@ public class ShortConnectionSender extends Sender {
 			} // end of else
 		} catch (Exception ex) {
 			log.error(ex, ex);
+		} finally {
+			// V4.1 Late ACK: Confirm completion to Redis after sending and reporting result
+			com.king.gmms.messagequeue.StreamQueueManager.getInstance().ack(
+					com.king.gmms.messagequeue.StreamQueueManager.STR_OUTBOUND_HTTP, 
+					"cg_http_clients", 
+					msg, 
+					true);
 		}
 	}
 

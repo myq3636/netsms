@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.TimeZone;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -31,6 +32,7 @@ import com.king.message.gmms.GmmsMessage;
 import com.king.message.gmms.GmmsStatus;
 import com.king.message.gmms.MessageStoreManager;
 import com.king.rest.util.StringUtility;
+import com.king.gmms.metrics.MetricsCollector;
 
 public class MessageProcessorThread extends RunnableMsgTask{
 	private static SystemLogger log = SystemLogger
@@ -67,6 +69,7 @@ public class MessageProcessorThread extends RunnableMsgTask{
 
 	@Override
 	public void run() {
+		long _mptStart = System.nanoTime();
 		try {
 			if (message == null) {
 				return;
@@ -74,6 +77,7 @@ public class MessageProcessorThread extends RunnableMsgTask{
 			String messageType = message.getMessageType();
 			message.setTransaction(null);//Clear old transactionURL
 		if (GmmsMessage.MSG_TYPE_DELIVERY_REPORT.equalsIgnoreCase(messageType)) {
+			MetricsCollector.getInstance().incrementCounter("mpt.run.dr");
 			try {
 				transactDR(message);
 			} catch (Exception e) {
@@ -98,6 +102,7 @@ public class MessageProcessorThread extends RunnableMsgTask{
 			}
 		} else if (GmmsMessage.MSG_TYPE_DELIVERY.equalsIgnoreCase(messageType)
 				|| GmmsMessage.MSG_TYPE_SUBMIT.equalsIgnoreCase(messageType)) {
+			MetricsCollector.getInstance().incrementCounter("mpt.run.submit");
 			try {
 				A2PCustomerInfo rCustomer = ctm.getCustomerBySSID(message.getRSsID());
 				if (("blackhole".equalsIgnoreCase(rCustomer.getRole()) || isBlackholedNew(message))) {
@@ -171,13 +176,12 @@ public class MessageProcessorThread extends RunnableMsgTask{
 				dbHandler.putMsg(message);
 			}
 		} else {
-			log.warn(message, new StringBuilder(40).append(
-					"Message type error:").append(message.getMessageType())
-					.toString());
+			log.warn(message, "Message type error:{}", message.getMessageType());
 			message.setStatus(GmmsStatus.UNKNOWN_ERROR);
 			dbHandler.putMsg(message);
 		}
 		} finally {
+			MetricsCollector.getInstance().recordTime("mpt.run", System.nanoTime() - _mptStart);
 			com.king.db.DataManager.closeAllSessions();
 		}
 	}
@@ -216,8 +220,8 @@ public class MessageProcessorThread extends RunnableMsgTask{
 						return true;
 					}
 					
-					Random r = new Random();
-					double tmp = r.nextDouble();
+					// 6.5 Optimization: use ThreadLocalRandom instead of new Random()
+					double tmp = ThreadLocalRandom.current().nextDouble();
 					if (tmp < blackholePercent/100.0) {
 						if(log.isInfoEnabled()){
 							log.info(message, "message blackholed.");
@@ -289,8 +293,8 @@ public class MessageProcessorThread extends RunnableMsgTask{
 						return true;
 					}
 					
-					Random r = new Random();
-					double tmp = r.nextDouble();
+					// 6.5 Optimization: use ThreadLocalRandom instead of new Random()
+					double tmp = ThreadLocalRandom.current().nextDouble();
 					if (tmp < blackholePercent/100.0) {
 						if(log.isInfoEnabled()){
 							log.info(message, "message blackholed.");
@@ -713,28 +717,10 @@ public class MessageProcessorThread extends RunnableMsgTask{
 
 		// Select Queue
 		String queue = server.getChlQueue();
-		String moduleName = null;
-		TransactionURI transaction = null;
-		if (isSupportMgt(server)) {
-			Session session = connectionManager.getSession(message, message
-					.getRSsID(), queue);
-			if (session != null) {
-				transaction = session.getTransactionURI();
-				//log.debug(message, "message processer handler get the transactionURL is {}", transaction);
-				moduleName = transaction.getModule().getModule();
-			} else if(!isInit(server)){//chlInit=no
-				moduleName = moduleManager.selectChannel(queue);
-				log.info(message, "Can not find customer session to send message, isInit=false, try random function module");
-			} else {
-				moduleName = moduleManager.selectChannel(queue);
-				if(log.isInfoEnabled()){
-					log.info(message,
-						"Can not find customer session to send message, and try message to random function module");
-				}
-			}
-		} else {
-			moduleName = moduleManager.selectChannel(queue);
-		}
+		// V4.1 Stateless Routing: Session-based sticky routing is disabled.
+		// Core no longer tracks specific nodes for individual TCP connections.
+		String moduleName = moduleManager.selectChannel(queue);
+		TransactionURI transaction = null; // No specific session transaction
 		OperatorMessageQueue messagequeue = factory.getMessageQueue(message,
 				moduleName);
 		
@@ -742,6 +728,21 @@ public class MessageProcessorThread extends RunnableMsgTask{
 			if (isFakeDR) {
 				msg.setFakeDR(false);
 			}
+			
+			// V4.1 Decentralized HTTP Outbound: Dispatch via Redis Stream
+			if (server != null && "HTTP".equalsIgnoreCase(server.getProtocol())) {
+				msg.setProperty("Protocol", "HTTP");
+				msg.setDeliveryChannel(moduleName); // Preserve selected module label
+				if (com.king.gmms.messagequeue.StreamQueueManager.getInstance().produceOutboundMessage(msg)) {
+					if (log.isInfoEnabled()) {
+						log.info(msg, "Dispatched HTTP MT task to Redis Stream: {}", com.king.gmms.messagequeue.StreamQueueManager.STR_OUTBOUND_HTTP);
+					}
+					continue;
+				} else {
+					log.error(msg, "Failed to dispatch HTTP MT task to Redis Stream");
+				}
+			}
+
 			if (moduleName == null) {
 				msg.setStatus(GmmsStatus.SERVER_ERROR);
 				if(log.isInfoEnabled()){
@@ -874,26 +875,33 @@ public class MessageProcessorThread extends RunnableMsgTask{
 				if(log.isInfoEnabled()){
 					log.info(message, "Can not find moduleName to send message.");
 				}
-				message.setStatusCode(GmmsStatus.FAIL_SENDOUT_DELIVERYREPORT
-						.getCode());
-				dbHandler.putMsg(message);
-				return;
+				// V4.0 Fallback: Even if no direct moduleName found, we produce to Redis
+				// Core shouldn't care about specific module name in the async model
 			}
 
-			OperatorMessageQueue messagequeue = factory.getMessageQueue(
-					message, moduleName);
+			// V4.1 High-Reliability Decentralized DR Push
+			boolean success = false;
+			if (server != null && "HTTP".equalsIgnoreCase(server.getProtocol())) {
+				message.setProperty("Protocol", "HTTP");
+				message.setDeliveryChannel(moduleName);
+				success = com.king.gmms.messagequeue.StreamQueueManager.getInstance().produceOutboundMessage(message);
+			} else {
+				// Old logic for Carrier DR ingestion or Sticky routing
+				success = com.king.gmms.messagequeue.StreamQueueManager.getInstance().produceDeliveryReport(message);
+			}
 
-			if (messagequeue != null) {
-				message.setTransaction(transaction);
-				message.setDeliveryChannel(message.getDeliveryChannel()+":"+moduleName);
-				if (!messagequeue.putMsg(message)) {
-					if(log.isInfoEnabled()){
-						log.info(message,
-									"Can not put the message to sender queue");
-					}
-					message.setStatusCode(GmmsStatus.FAIL_SENDOUT_DELIVERYREPORT.getCode());
-					dbHandler.putMsg(message);
-				} else {
+			if (!success) {
+				if(log.isInfoEnabled()){
+					log.info(message,
+								"Can not produce the DR message to Redis Stream");
+				}
+				message.setStatusCode(GmmsStatus.FAIL_SENDOUT_DELIVERYREPORT.getCode());
+				dbHandler.putMsg(message);
+			} else {
+				if(log.isDebugEnabled()){
+					log.debug(message, "Success to produce DR message to Redis Stream");
+				}
+			}
 					if(log.isInfoEnabled()){
 						log.info(message, "Send {} to {}",message.getMessageType(), moduleName);
 					}

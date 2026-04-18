@@ -20,7 +20,8 @@ import com.king.gmms.connectionpool.sessionthread.ServerSessionThread;
 import com.king.gmms.connectionpool.sessionthread.SessionThread;
 import com.king.gmms.customerconnectionfactory.InternalAgentConnectionFactory;
 import com.king.gmms.customerconnectionfactory.MultiSmppServerFactory;
-import com.king.gmms.domain.A2PCustomerManager;
+import com.king.gmms.messagequeue.StreamQueueManager;
+import com.king.gmms.routing.ADSServerMonitor;
 import com.king.gmms.domain.A2PMultiConnectionInfo;
 import com.king.gmms.domain.ConnectionInfo;
 import com.king.gmms.domain.ModuleManager;
@@ -65,6 +66,7 @@ import com.king.message.gmms.GmmsStatus;
 import com.king.message.gmms.MessageIdGenerator;
 import com.king.rest.util.StringUtility;
 import com.king.gmms.protocol.smpp.util.SmppByteBuffer;
+import com.king.gmms.metrics.SmppPduLogger;
 
 
 /**
@@ -81,6 +83,7 @@ import com.king.gmms.protocol.smpp.util.SmppByteBuffer;
  */
 public class MultiSmppSession extends AbstractCommonSession {
     private static SystemLogger log = SystemLogger.getSystemLogger(MultiSmppSession.class);
+    private static final SmppPduLogger pduLogger = SmppPduLogger.getInstance();
     protected String gmmsSystemID = "AicGMMSServer";
     protected Smpp smpp = null;
     protected String ip = null;
@@ -217,7 +220,7 @@ public class MultiSmppSession extends AbstractCommonSession {
             return true;
         }
         int ssid = customerInfo.getSSID();
-        int applySuccess = applyNewSession();
+        int applySuccess = 0;// applyNewSession();
         if(applySuccess!=0){
         	if(applySuccess==3){
         		log.warn("ssid: {} applyNewSession failed!", ssid);
@@ -402,6 +405,7 @@ public class MultiSmppSession extends AbstractCommonSession {
      * 3: apply no response
      */
     protected int applyNewSession(){
+/*
         if(isEnableSysMgt){
         	if(connectionInfo.getSessionNum() > 0 && connectionManager != null){
         		Connection connection = connectionManager.getConnection(connectionInfo.getConnectionName());
@@ -427,6 +431,8 @@ public class MultiSmppSession extends AbstractCommonSession {
         }else{
         	return 0;
         }
+*/
+        return 0;
     }
     /**
      * connectionUnavailable
@@ -506,6 +512,8 @@ public class MultiSmppSession extends AbstractCommonSession {
             log.trace("Smpp session start at: {}", System.currentTimeMillis());
         }
         PDU pdu = (PDU) obj;
+        // Log received PDU to dedicated SMPP PDU log file
+        pduLogger.logReceived(isServer ? "server" : "client", sessionName, pdu);
         if(log.isTraceEnabled()){
             log.trace("Receive a pdu:{}", pdu.toString());
         }
@@ -580,6 +588,12 @@ public class MultiSmppSession extends AbstractCommonSession {
                 	}                
                 	
                 	msg = processor.handleSubmitSM(request);
+                	
+                	// V4.0 Sticky Routing: Tag message with source session context
+                	if (msg != null) {
+                		msg.setInnerTransaction(transaction);
+                	}
+
                 	if(log.isInfoEnabled()){
     					log.info(msg, "Smpp receive message :{}",msg);
                 	}
@@ -624,24 +638,32 @@ public class MultiSmppSession extends AbstractCommonSession {
                         
                         }
                 	
-                    if(!putGmmsMessage2RouterQueue(msg)){
+                	// V4.0 异步化：将消息提交到 Redis Stream (Submit-MQ)
+                    boolean produceSuccess = StreamQueueManager.getInstance().produceSubmitMessage(msg);
+                    if(!produceSuccess){
+                        log.error(msg, "Failed to produce SUBMIT_SM to Redis Stream!");
                         Response response = request.getResponse();
                         try{
-	                        response.setCommandStatus(com.king.gmms.protocol.smpp.util.Data.ESME_RX_T_APPN);
+	                        response.setCommandStatus(com.king.gmms.protocol.smpp.util.Data.ESME_RSYSERR);
 	                        connection.send(response.getData().getBuffer());
                         }catch(Exception e){
-                        	log.warn(msg,"Fail to send response");
+                        	log.warn(msg,"Fail to send error response");
                         }
-                        if(log.isInfoEnabled()){
-        					log.info(msg,"send response {}",response.getCommandStatus());
+                    } else {
+                        // V4.0 异步化：入队成功后立即向 ESME 确认
+                        Response response = request.getResponse();
+                        try {
+                            if (response instanceof SubmitSMResp) {
+                                ((SubmitSMResp) response).setMessageId(msg.getMsgID());
+                            }
+                            response.setCommandStatus(com.king.gmms.protocol.smpp.util.Data.ESME_ROK);
+                            connection.send(response.getData().getBuffer());
+                            if(log.isInfoEnabled()){
+                                log.info(msg, "SUBMIT_SM accepted asynchronously, MsgID: {}", msg.getMsgID());
+                            }
+                        } catch (Exception e) {
+                            log.warn(msg, "Fail to send success response");
                         }
-						/*
-						 * }else{ //send response with out wait to dr response from core GmmsMessage
-						 * respMsg = new GmmsMessage(msg);
-						 * if(GmmsMessage.MSG_TYPE_DELIVERY_REPORT.equalsIgnoreCase(msg.getMessageType()
-						 * )){ respMsg.setMessageType(GmmsMessage.MSG_TYPE_DELIVERY_REPORT_RESP); }
-						 * sendSubmitSMRespWithoutInnerack(respMsg);
-						 */
                     }
                 }
                 else if (commandId == Data.DELIVER_SM) {
@@ -652,6 +674,12 @@ public class MultiSmppSession extends AbstractCommonSession {
                         return;
                 	}
                 	msg = processor.handleDeliverSM(request);
+
+                	// V4.0 Sticky Routing: Tag message with source session context
+                	if (msg != null) {
+                		msg.setInnerTransaction(transaction);
+                	}
+
                 	if(log.isInfoEnabled()){
                 		log.info(msg, "Smpp receive message :{}",msg);
                 	}
@@ -698,24 +726,30 @@ public class MultiSmppSession extends AbstractCommonSession {
                        	  }
                         }
                 	
-                    if(!putGmmsMessage2RouterQueue(msg)){
+                	// V4.0 异步化：将消息提交到 Redis Stream (Submit-MQ)
+                    boolean produceSuccess = StreamQueueManager.getInstance().produceSubmitMessage(msg);
+                    if(!produceSuccess){
+                        log.error(msg, "Failed to produce DELIVER_SM to Redis Stream!");
                         Response response = request.getResponse();
                         try{
-	                        response.setCommandStatus(com.king.gmms.protocol.smpp.util.Data.ESME_RX_T_APPN);
+	                        response.setCommandStatus(com.king.gmms.protocol.smpp.util.Data.ESME_RSYSERR);
 	                        connection.send(response.getData().getBuffer());
                         }catch(Exception e){
-                        	log.warn(msg,"Fail to send response");
+                        	log.warn(msg,"Fail to send error response");
                         }
-                        if(log.isInfoEnabled()){
-        					log.info(msg,"send response {}",response.getCommandStatus());
+                    } else {
+                        // V4.0 异步化：入队成功后立即向 ESME 确认
+                        Response response = request.getResponse();
+                        try {
+                            // DELIVER_SM_RESP usually doesn't have a mandatory message_id field but some systems use it
+                            response.setCommandStatus(com.king.gmms.protocol.smpp.util.Data.ESME_ROK);
+                            connection.send(response.getData().getBuffer());
+                            if(log.isInfoEnabled()){
+                                log.info(msg, "DELIVER_SM accepted asynchronously, MsgID: {}", msg.getMsgID());
+                            }
+                        } catch (Exception e) {
+                            log.warn(msg, "Fail to send success response");
                         }
-						/*
-						 * }else{ //send response with out wait to dr response from core GmmsMessage
-						 * respMsg = new GmmsMessage(msg);
-						 * if(GmmsMessage.MSG_TYPE_DELIVERY_REPORT.equalsIgnoreCase(msg.getMessageType()
-						 * )){ respMsg.setMessageType(GmmsMessage.MSG_TYPE_DELIVERY_REPORT_RESP); }
-						 * sendSubmitSMRespWithoutInnerack(respMsg);
-						 */
                     }
                 }
                 else if (commandId == Data.UNBIND) {
@@ -837,10 +871,31 @@ public class MultiSmppSession extends AbstractCommonSession {
 
     }
     
+    private static volatile String cachedThcon = "1";
+    private static volatile long lastThconCheckTime = 0;
+
+    private String getThconStatus() {
+        long now = System.currentTimeMillis();
+        if (now - lastThconCheckTime > 50000) {
+            try {
+                String value = GmmsUtility.getInstance().getRedisClient().getString("thcon");
+                if (value != null) {
+                    cachedThcon = value;
+                } else {
+                    cachedThcon = "";
+                }
+                lastThconCheckTime = now;
+            } catch (Exception e) {
+                // Ignore transient Redis errors; reuse last cached value
+            }
+        }
+        return cachedThcon;
+    }
+    
     private boolean checkThrottlingControl(Request request){
         try {
             if (customerInfo != null) {
-            	if(!StringUtility.stringIsNotEmpty(GmmsUtility.getInstance().getRedisClient().getString("thcon"))){
+            	if(!StringUtility.stringIsNotEmpty(getThconStatus())){
             		Response response = request.getResponse();
                 	response.setCommandStatus(com.king.gmms.protocol.smpp.util.Data.ESME_RTHROTTLED);
                 	connection.send(response.getData().getBuffer());
@@ -1077,9 +1132,16 @@ public class MultiSmppSession extends AbstractCommonSession {
 
                             }
                             else {
+                                bindResponse.setCommandStatus(Data.ESME_ROK);
+                                respond4Bind(bindResponse);
                                 setStatus(ConnectionStatus.CONNECT);
+                                
+                                // V4.0 Async Routing: Start listening for DRs for this SSID on this node
+                                com.king.gmms.messagequeue.DRStreamConsumer.getInstance().registerSSID(this.connectionInfo.getSsid());
+                                
+                                i = infos.size();
+                                break;
                             }
-                            bindResponse.setCommandStatus(Data.ESME_ROK);
                             smpp.initSmppPara(cusInfo,this.connectionInfo);
                             startBufferMonitor(customerInfo);
                             updateReceivers();
@@ -1522,6 +1584,7 @@ public class MultiSmppSession extends AbstractCommonSession {
                 ;
             if(isKeepRunning()){
                 connection.send(request.getData().getBuffer());
+                pduLogger.logSent(isServer ? "server" : "client", sessionName, request);
                 if(log.isInfoEnabled()){
 					log.info(msg,"send dr, inTransID {}", key);
                 }
@@ -1591,6 +1654,7 @@ public class MultiSmppSession extends AbstractCommonSession {
 
             if(isKeepRunning()){
             	connection.send(request.getData().getBuffer());
+            	pduLogger.logSent(isServer ? "server" : "client", sessionName, request);
                 msg.setOutTransID(key);
                 result = true;
 
@@ -1693,6 +1757,7 @@ public class MultiSmppSession extends AbstractCommonSession {
 
             if (isKeepRunning()) {
                 connection.send(delivSm.getData().getBuffer());
+                pduLogger.logSent(isServer ? "server" : "client", sessionName, delivSm);
                 deliverMsg.setOutTransID(key);
                 result = true;
             }
@@ -1796,6 +1861,7 @@ public class MultiSmppSession extends AbstractCommonSession {
             }
             if (isKeepRunning()) {
                 connection.send(delivSm.getData().getBuffer());
+                pduLogger.logSent(isServer ? "server" : "client", sessionName, delivSm);
                 deliverMsg.setInTransID(key);
                 if(log.isInfoEnabled()){
 					log.info(deliverMsg,"send dr, inTransID {}", key);
@@ -1856,6 +1922,7 @@ public class MultiSmppSession extends AbstractCommonSession {
         boolean result = true;
         try {
             connection.send(response.getData().getBuffer());
+            pduLogger.logSent(isServer ? "server" : "client", sessionName, response);
         }
         catch (Exception ex) {
             result = false;
@@ -1876,21 +1943,6 @@ public class MultiSmppSession extends AbstractCommonSession {
         	if(log.isInfoEnabled()){
 				log.info(msg,"Send {} response to customer, status {}",msg.getMessageType(),response.getCommandStatus());
         	}
-            if (msg.getMessageType().equals(GmmsMessage.MSG_TYPE_SUBMIT_RESP)) {
-                msg.setMessageType(GmmsMessage.MSG_TYPE_INNER_ACK);
-                if(!putGmmsMessage2RouterQueue(msg)){
-                	if(log.isInfoEnabled()){
-                		log.info(msg,"Fail to send back the inner ack({}) to core engine",GmmsMessage.MSG_TYPE_SUBMIT_RESP);
-                	}
-                }
-            }else if(msg.getMessageType().equals(GmmsMessage.MSG_TYPE_DELIVERY_REPORT_RESP)) {
-            	msg.setMessageType(GmmsMessage.MSG_TYPE_INNER_ACK);
-            	 if(!putGmmsMessage2RouterQueue(msg)){
-                 	if(log.isInfoEnabled()){
-                 		log.info(msg,"Fail to send back the inner ack({}) to core engine",GmmsMessage.MSG_TYPE_DELIVERY_REPORT_RESP);
-                 	}
-                 }
-            }
         }
         catch (Exception ex) {
             result = false;
@@ -1904,18 +1956,11 @@ public class MultiSmppSession extends AbstractCommonSession {
         boolean result = true;
         try {
         	connection.send(response.getData().getBuffer());
+        	pduLogger.logSent(isServer ? "server" : "client", sessionName, response);
         	if(log.isInfoEnabled()){
 				log.info(msg,"Send {} response to customer, status {}",msg.getMessageType(),response.getCommandStatus());
         	}
-            if (msg.getMessageType().equals(GmmsMessage.MSG_TYPE_SUBMIT_RESP)) {
-                msg.setMessageType(GmmsMessage.MSG_TYPE_INNER_ACK);
-                if(!putGmmsMessage2RouterQueue(msg)){
-                	if(log.isInfoEnabled()){
-                		log.info(msg,"Fail to send back the inner ack({}) to core engine",GmmsMessage.MSG_TYPE_SUBMIT_RESP);
-                	}
-                }
-            }
-            //remove response innerACK
+
             /*else if(msg.getMessageType().equals(GmmsMessage.MSG_TYPE_DELIVERY_REPORT_RESP)) {
             	msg.setMessageType(GmmsMessage.MSG_TYPE_INNER_ACK);
             	 if(!putGmmsMessage2RouterQueue(msg)){
@@ -1965,7 +2010,6 @@ public class MultiSmppSession extends AbstractCommonSession {
 		else if(GmmsMessage.MSG_TYPE_SUBMIT_RESP.equalsIgnoreCase(msg.getMessageType()) 
 				|| GmmsMessage.MSG_TYPE_DELIVERY_REPORT_RESP.equalsIgnoreCase(msg.getMessageType())){
 			msg.setStatusCode(1);
-	        msg.setMessageType(GmmsMessage.MSG_TYPE_INNER_ACK);
 		}
         if(log.isInfoEnabled()){
         	log.info(msg,"{} do not receive the response after timeout", msg.getMessageType());

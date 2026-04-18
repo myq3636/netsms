@@ -31,6 +31,9 @@ public class ConnectionManagementForCore extends ConnectionManagement implements
 	private ConnectionManagementForCore(){
 		super();
 		moduleManager = ModuleManager.getInstance();
+		// V4.1 Stateless: Clear maps that relied on legacy TCP sync
+		moduleSession.clear();
+		ssidConnManager.clear();
 	}
 	/**
 	 * singleton model
@@ -114,22 +117,10 @@ public class ConnectionManagementForCore extends ConnectionManagement implements
 	 * @return
 	 */
 	public SystemPdu handleStatusNotification(SystemPdu message) {
-		String version = this.custManager.getConfFileVersion();
-		boolean verFlag = message.getConfFileVersion().equalsIgnoreCase(version);
+		// V4.1 Async Transformation: No longer processing session status via TCP
 		ConnectionStatusNotificationAck response = new ConnectionStatusNotificationAck(message);
 		response.setUuid(message.getUuid());
-		if(verFlag){
-			boolean flag = updateConnectionInfo(message);						
-			if (flag) {
-				response.setResponseCode(0);
-			} else {
-				response.setResponseCode(1);
-			}
-		}else{
-			response.setResponseCode(2);
-			log.warn("cm.cfg didn't consistent with Core manager's,reject {}!", message);
-		}
-		
+		response.setResponseCode(0); // Always success to appease the sender
 		return response;
 	}	
 	/**
@@ -143,37 +134,8 @@ public class ConnectionManagementForCore extends ConnectionManagement implements
 	 * @return
 	 */
 	private boolean updateConnectionInfo(SystemPdu message) {
-		ConnectionStatusNotification notifyMsg = (ConnectionStatusNotification)message;
-		String uuid = notifyMsg.getUuid();
-		String action = notifyMsg.getAction();
-		if(uuid==null){
-			return false;
-		}
-		TransactionURI tranaction = TransactionURI.fromString(uuid);
-		String moduleName = tranaction.getModule().getModule();
-		if(tranaction.getConnectionName()==null||"".equals(tranaction.getConnectionName())){//module
-			if(SystemConstants.DISCONNECTED_ACTION.equalsIgnoreCase(action)){//clear connection info of module
-				this.clearConnnectionByModule(moduleName);
-				return true;
-			}else{
-					log.warn("Invalid tranaction when handle StatusNotification:{}",message);
-				return false;
-			}
-		}
-		int ssid = notifyMsg.getSsid();
-		if(ssid <= 0){
-			log.warn("Invalid ssid {} when handle StatusNotification:{}", ssid,	message);
-			return false;
-		}
-		//clear connection info of connection
-		if(SystemConstants.CONNECTED_ACTION.equalsIgnoreCase(action)){
-			return this.addSession(message);
-		}else if(SystemConstants.DISCONNECTED_ACTION.equalsIgnoreCase(action)){
-			return this.clearSession(tranaction,ssid);
-		}else{
-				log.warn("Unkown action when handle status notification:{}",message);
-		}
-		return false;
+		// V4.1 Stateless: Bypassing internal connection map updates
+		return true;
 	}
 	/**
 	 * clearConnnectionByModule

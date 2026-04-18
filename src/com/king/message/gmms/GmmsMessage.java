@@ -68,6 +68,7 @@ public class GmmsMessage extends MessageBase {
 	
 	protected String deliveryChannel = null;
 	protected String routingSsIDs = null;
+	protected String redisStreamID = null; // V4.0 Redis Stream ID for ACK
 	
 	
 //	protected boolean inClientPull = false;
@@ -391,7 +392,7 @@ public class GmmsMessage extends MessageBase {
 		this.serviceTypeID = oneMsg.getServiceTypeID();
 		this.routingSsIDs = oneMsg.getRoutingSsIDs();
 		this.outsender = oneMsg.getOutsender();
-		
+		this.redisStreamID = oneMsg.redisStreamID;
 	}
 
 	// public String getOwnerA2P() {
@@ -758,6 +759,14 @@ public class GmmsMessage extends MessageBase {
 
 	public void setOutsender(String outsender) {
 		this.outsender = outsender;
+	}
+
+	public String getRedisStreamID() {
+		return redisStreamID;
+	}
+
+	public void setRedisStreamID(String redisStreamID) {
+		this.redisStreamID = redisStreamID;
 	}
 	
 	

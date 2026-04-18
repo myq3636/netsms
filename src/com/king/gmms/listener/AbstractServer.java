@@ -13,13 +13,10 @@ import com.king.framework.A2PService;
 import com.king.framework.A2PThreadGroup;
 import com.king.framework.SystemLogger;
 import com.king.gmms.GmmsUtility;
-import com.king.gmms.connectionpool.systemmanagement.ConnectionManagementForFunction;
-import com.king.gmms.ha.systemmanagement.SystemListener;
-import com.king.gmms.ha.systemmanagement.SystemSession;
-import com.king.gmms.ha.systemmanagement.SystemSessionFactory;
 import com.king.gmms.ha.systemmanagement.pdu.ModuleRegisterAck;
-import com.king.gmms.throttle.ReportInMsgCountTimer;
-import com.king.gmms.throttle.ResetDynamicCustInThresholdTimer;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public abstract class AbstractServer implements A2PService, Runnable {
 	private static SystemLogger log = SystemLogger
@@ -28,40 +25,17 @@ public abstract class AbstractServer implements A2PService, Runnable {
 	protected volatile boolean running;
 	protected String module;
 	protected ServerSocket server = null;
-	protected InternalAgentListener agentListener = null;
-	protected SystemListener systemListener = null;
 	protected ServerSocket serverSocket;// Init in run
 	protected Thread serverThread;
 	protected int port; // smpp server listener port
-	protected SystemSession systemSession = null; // system client
-	protected SystemSessionFactory sysFactory = null;
-	protected boolean isEnableSysMgt = false;
-    protected boolean canHandover = false;
-	protected ReportInMsgCountTimer reportInMsgCountTimer = null;
-	protected ResetDynamicCustInThresholdTimer resetDynamicCustInThresholdTimer = null;
+	protected ScheduledExecutorService heartbeatExecutor = null;
 
 
 	public AbstractServer() {
 		this.gmmsUtility = GmmsUtility.getInstance();
 		running = true;
-		agentListener = InternalAgentListener.getInstance();
 		module = System.getProperty("module");
 		port = Integer.parseInt(gmmsUtility.getModuleProperty("Port").trim());
-		isEnableSysMgt = gmmsUtility.isSystemManageEnable();
-		canHandover = gmmsUtility.isDBHandover();
-		if (canHandover || isEnableSysMgt) {
-			systemListener = SystemListener.getInstance();
-			try {
-				sysFactory = SystemSessionFactory.getInstance();
-				systemSession = sysFactory.getSystemSessionForFunction();
-				reportInMsgCountTimer = new ReportInMsgCountTimer(systemSession, 
-						gmmsUtility.getReportModuleIncomingMsgCountInterval());
-				resetDynamicCustInThresholdTimer = 
-					new ResetDynamicCustInThresholdTimer(gmmsUtility.getDynamicCustInThresholdExipreTime()/3);
-			} catch (Exception e) {
-				log.warn(e, e);
-			}
-		}
 	}
 
 	/**
@@ -120,21 +94,26 @@ public abstract class AbstractServer implements A2PService, Runnable {
 			serverThread = new Thread(A2PThreadGroup.getInstance(), this,
 					module);
 			serverThread.start();
-			String redisStatus = "M";
-			if (canHandover || isEnableSysMgt) {
-				systemListener.start();
-				if (systemSession != null) {
-					ModuleRegisterAck ack = systemSession.moduleRegisterInDetail();
-		        	if(ack!=null){
-		        		redisStatus = ack.getRedisStatus();
-		        	}
-					
-					reportInMsgCountTimer.startTimer("reportInMsgCountTimer");
-					resetDynamicCustInThresholdTimer.startTimer("resetDynamicCustInThresholdTimer");
-				}
-				
-			}
+			String redisStatus = "M"; // V4.0 Default to Master, synchronized via Redis Pub/Sub
+			
 			gmmsUtility.initRedisClient(redisStatus);
+			
+			// V4.0 Redis Heartbeat Mechanism
+			String nodeId = System.getProperty("NodeID", "0");
+			final String statusKey = "module:status:" + module + ":" + nodeId;
+			heartbeatExecutor = Executors.newSingleThreadScheduledExecutor();
+			heartbeatExecutor.scheduleAtFixedRate(new Runnable() {
+				@Override
+				public void run() {
+					try {
+						gmmsUtility.getRedisClient().setString(statusKey, "ONLINE");
+						gmmsUtility.getRedisClient().setExpire(statusKey, 30); // 30s TTL
+					} catch (Exception e) {
+						log.warn("Failed to update Redis heartbeat for " + module, e);
+					}
+				}
+			}, 0, 10, TimeUnit.SECONDS); // Ping every 10 seconds
+
 			log.info("{} starting...", module);
 			return true;
 		} catch (Exception ex) {
@@ -147,12 +126,9 @@ public abstract class AbstractServer implements A2PService, Runnable {
 	public boolean stopService() {
 		running = false;
 		try {
-			if (canHandover || isEnableSysMgt) {
-				beforeStop();
-				systemListener.stop();
-				if (systemSession != null) {
-					systemSession.shutdown();
-				}
+			beforeStop();
+			if (heartbeatExecutor != null) {
+				heartbeatExecutor.shutdownNow();
 			}
 			serverThread.join();
 			if (serverSocket != null) {
@@ -177,15 +153,12 @@ public abstract class AbstractServer implements A2PService, Runnable {
 	 * send stop request
 	 */
 	public void beforeStop() {
-		if (canHandover || isEnableSysMgt) {
-			reportInMsgCountTimer.stopTimer();
-			resetDynamicCustInThresholdTimer.stopTimer();
-			ConnectionManagementForFunction systemManager = ConnectionManagementForFunction
-					.getInstance();
-			boolean flag = systemManager.moduleStop(module);
-			if (flag) {
-				systemSession.moduleStop();
-			}
+		try {
+			String nodeId = System.getProperty("NodeID", "0");
+			String statusKey = "module:status:" + module + ":" + nodeId;
+			gmmsUtility.getRedisClient().del(statusKey);
+		} catch (Exception e) {
+			log.warn("Failed to delete module status key on stop", e);
 		}
 	}
 }

@@ -48,6 +48,7 @@ import com.king.gmms.protocol.commonhttp.JxToken;
 import com.king.gmms.protocol.smpp.util.TimeFormatter;
 import com.king.gmms.threadpool.ExecutorServiceManager;
 import com.king.gmms.throttle.ThrottlingControl;
+import com.king.gmms.messagequeue.StreamQueueManager;
 import com.king.message.gmms.GmmsMessage;
 import com.king.message.gmms.GmmsStatus;
 import com.king.message.gmms.MessageBase;
@@ -104,6 +105,13 @@ public class CommonHttpServlet extends AbstractHttpServer {
 				}
 				//receiverThreadPool = executorServiceManager.newFixedThreadPool(this, "IntReceiver_commonHttpServer", 10);
 				startAgentConnection(factory);
+				
+				// V4.0 Async Routing: Register all HTTP SSIDs for DR polling
+				if (alSsid != null) {
+					for (int ssid : alSsid) {
+						com.king.gmms.messagequeue.DRStreamConsumer.getInstance().registerSSID(ssid);
+					}
+				}
 			}
 			super.startService();
 		} catch (Exception ex) {
@@ -174,6 +182,10 @@ public class CommonHttpServlet extends AbstractHttpServer {
 					for (JxSubMessage jxSubMsg : jxMessage.getMSG()) {
 						GmmsMessage gmmsMessage  = new GmmsMessage();
 						gmmsMessage.setOSsID(sInfo.getSSID());
+						
+						// V4.0 Sticky Routing Context
+						gmmsMessage.setInnerTransaction(new com.king.gmms.ha.TransactionURI());
+						
 						String commonMsgID = MessageIdGenerator.generateCommonMsgID(sInfo.getSSID());
 						gmmsMessage.setMsgID(commonMsgID);
 						String content = jxSubMsg.getBODY();						
@@ -287,18 +299,17 @@ public class CommonHttpServlet extends AbstractHttpServer {
 							}       					     
                        	  }    
 						
-						if (!putGmmsMessage2RouterQueue(gmmsMessage)) {
+						// V4.0 异步化逻辑：将消息提交到 Redis Stream (Submit-MQ)
+						boolean produceSuccess = StreamQueueManager.getInstance().produceSubmitMessage(gmmsMessage);
+						if (!produceSuccess) {
+							log.error(gmmsMessage, "Failed to produce message to Redis Stream!");
+							// 如果入队失败（Redis故障），记录 CDR 并尝试返回错误
 							gmmsUtility.getCdrManager().logInSubmit(gmmsMessage);
-							if (gmmsMessage.getDeliveryReport()) {
-								gmmsMessage.setMessageType(GmmsMessage.MSG_TYPE_DELIVERY_REPORT);
-								gmmsMessage.setRSsID(sInfo.getSSID());
-								gmmsMessage.setOutMsgID(gmmsMessage.getInMsgID());
-								gmmsMessage.setStatus(GmmsStatus.REJECTED);
-								if (!putGmmsMessage2RouterQueue(gmmsMessage)) {
-									gmmsUtility.getCdrManager().logInDeliveryReportRes(gmmsMessage);									
-								}
-							}							
+							msg.setStatus(GmmsStatus.SERVER_ERROR);
+							this.response(msg, request, response);
+							return;
 						}
+						// 入队成功即视为处理成功
 					}
 				}
 		} catch (Exception e) {

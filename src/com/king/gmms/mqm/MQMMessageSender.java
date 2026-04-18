@@ -4,11 +4,7 @@ import java.util.ArrayList;
 
 import com.king.framework.SystemLogger;
 import com.king.gmms.GmmsUtility;
-import com.king.gmms.customerconnectionfactory.InternalMQMConnectionFactory;
-import com.king.gmms.domain.A2PCustomerManager;
-import com.king.gmms.domain.ModuleManager;
-import com.king.gmms.messagequeue.OperatorMessageQueue;
-import com.king.gmms.util.ExpiredMessageQueueWithSafeExit;
+import com.king.gmms.messagequeue.StreamQueueManager;
 import com.king.message.gmms.GmmsMessage;
 import com.king.message.gmms.GmmsStatus;
 import com.king.message.gmms.MessageStoreManager;
@@ -39,13 +35,11 @@ public class MQMMessageSender implements Runnable {
 	private ExpiredMessageQueueWithSafeExit messages;
 	private GmmsUtility gmmsUtility = null;
 	private MessageStoreManager msm = null;
-	private InternalMQMConnectionFactory factory = null;	
 
 	public MQMMessageSender(ExpiredMessageQueueWithSafeExit messages) {
 		gmmsUtility = GmmsUtility.getInstance();
 		msm = gmmsUtility.getMessageStoreManager();
 		this.messages = messages;		
-		factory = InternalMQMConnectionFactory.getInstance();
 	}
 
 	public void putMsg(GmmsMessage msg) {
@@ -58,54 +52,42 @@ public class MQMMessageSender implements Runnable {
 
 	public void run() {
 		log.info("MQMMessageSender Thread start!");
-		ModuleManager moduleManager = ModuleManager.getInstance();
-		String queueName = gmmsUtility.getRouterModule();
 		while (true) {
 			try {
-				//for Citic retry								
+				// Throttling for resends
 				try {
 					int resendThrottle = gmmsUtility.getResendDRThrottle();
-					if (resendThrottle !=0 && 1000/resendThrottle>0) {
-						Thread.sleep(1000/resendThrottle);
-					}					
+					if (resendThrottle != 0 && 1000 / resendThrottle > 0) {
+						Thread.sleep(1000 / resendThrottle);
+					}
 				} catch (Exception e) {
 					log.info("MQM Throttling sleep error.", e);
 				}
+
 				GmmsMessage msg = (GmmsMessage) messages.get(1000L);
 				if (msg != null) {
-					queueName = moduleManager.selectRouter(msg);
-					OperatorMessageQueue queue = factory.getMessageQueue(msg, queueName);					
-					if(queue == null){
-			        	String aliveRouterQueue = moduleManager.selectAliveRouter(queueName,msg);
-			        	queue = factory.getMessageQueue(msg, aliveRouterQueue);
-			        	if(queue == null){
-		            		ArrayList<String> failedRouters = new ArrayList<String>();
-		            		failedRouters.add(queueName);
-		            		failedRouters.add(aliveRouterQueue);
-		            		aliveRouterQueue = moduleManager.selectAliveRouter(failedRouters, msg);
-		            		while(aliveRouterQueue != null){
-		            			queue = factory.getMessageQueue(msg, aliveRouterQueue);
-		            			if(queue == null){
-		            				failedRouters.add(aliveRouterQueue);
-		            				aliveRouterQueue = moduleManager.selectAliveRouter(failedRouters, msg);
-		            			}else{
-		            				break;
-		            			}
-		            		}
-		            	}
-			        	queueName = aliveRouterQueue;
-			    	}
-					String deliveryChannel = msg.getDeliveryChannel();	
-					if(deliveryChannel!=null){
-						msg.setDeliveryChannel(deliveryChannel+":"+queueName);
-					}else{
-						msg.setDeliveryChannel(queueName);
+					boolean success = false;
+					String type = msg.getMessageType();
+
+					// V4.1 Async Distribution via Redis Streams
+					if (GmmsMessage.MSG_TYPE_SUBMIT.equalsIgnoreCase(type)
+							|| GmmsMessage.MSG_TYPE_DELIVERY.equalsIgnoreCase(type)) {
+						// Submit types (MT) go to pending stream for Core processing
+						success = StreamQueueManager.getInstance().produceSubmitMessage(msg);
+					} else if (GmmsMessage.MSG_TYPE_DELIVERY_REPORT.equalsIgnoreCase(type)
+							|| GmmsMessage.MSG_TYPE_DELIVERY_REPORT_QUERY.equalsIgnoreCase(type)) {
+						// Report types (DR feedback) go to results stream for Core processing
+						success = StreamQueueManager.getInstance().produceResult(msg);
+					} else {
+						log.warn(msg, "Unknown message type {} in MQM, attempting default result stream", type);
+						success = StreamQueueManager.getInstance().produceResult(msg);
 					}
-					if (!sendMessage(queue, msg)) {
+
+					if (!success) {
 						handleMessageError(msg);
 					} else {
-						if(log.isInfoEnabled()){
-							log.info(msg,"one messages to be sent to Core Engine.");
+						if (log.isInfoEnabled()) {
+							log.info(msg, "One message [{}] sent to Redis Stream successfully.", type);
 						}
 					}
 				}
@@ -113,26 +95,12 @@ public class MQMMessageSender implements Runnable {
 				log.error("Error accessing messages from messagestore", ex);
 			}
 		}
+			} catch (Exception ex) {
+				log.error("Error accessing messages from messagestore", ex);
+			}
+		}
 	}
 
-	/**
-	 * 
-	 * @param module
-	 * @param message
-	 */
-	private boolean sendMessage(OperatorMessageQueue queue, GmmsMessage message) {	
-		if (queue != null) {
-			if (!queue.putMsg(message)) {
-				return false;
-			}
-		} else {
-			if(log.isInfoEnabled()){
-				log.info(message, "Can not find the alive delivery router");
-			}
-			return false;
-		}
-		return true;
-	}
 
 	/**
 	 * handleMessageError

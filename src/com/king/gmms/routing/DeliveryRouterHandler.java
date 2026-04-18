@@ -6,6 +6,7 @@ import com.king.gmms.util.ExpiredMessageQueueWithHandlerThreadAndSafeExit;
 import com.king.gmms.util.QueueTimeoutInterface;
 import com.king.message.gmms.GmmsMessage;
 import com.king.message.gmms.GmmsStatus;
+import com.king.gmms.metrics.MetricsCollector;
 
 public class DeliveryRouterHandler implements QueueTimeoutInterface{
 	
@@ -58,6 +59,7 @@ public class DeliveryRouterHandler implements QueueTimeoutInterface{
 		if(message == null){
 			return false;
 		}
+		MetricsCollector.getInstance().incrementCounter("router.putMsg.total");
 		return messageQueue.put(message);
 	}
 	/**
@@ -65,6 +67,7 @@ public class DeliveryRouterHandler implements QueueTimeoutInterface{
 	 */
 	public void timeout(Object message) {
     	GmmsMessage bufferedMsg = (GmmsMessage)message;
+    	MetricsCollector.getInstance().incrementCounter("router.timeout");
         try {
             if (bufferedMsg != null) {
                 if (GmmsMessage.MSG_TYPE_DELIVERY_REPORT.equalsIgnoreCase(

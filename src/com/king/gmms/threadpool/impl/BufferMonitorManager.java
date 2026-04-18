@@ -52,11 +52,30 @@ public class BufferMonitorManager implements ExpiredMsgManager {
 		return instance;
 	}
 	
+	/**
+	 * 获取 Redis Stream 的积压长度 (代替本地队列的监控)
+	 * @param streamKey 队列的 key 名称
+	 * @return 积压长度，若失败返回 -1
+	 */
+	public long getStreamBacklogSize(String streamKey) {
+		com.king.redis.RedisConnection redis = com.king.redis.RedisClient.getInstance().getSubmitMqRedis();
+		if (redis != null) {
+			try (redis.clients.jedis.Jedis jedis = redis.getJedis()) {
+				return jedis.xlen(streamKey);
+			} catch (Exception e) {
+				log.error("Failed to fetch xlen for " + streamKey, e);
+			}
+		}
+		return -1;
+	}
+
 	/** 
 	 * @param queue
 	 * @return
+	 * @deprecated Redis 重构阶段一中降级对本地队列的监控，新架构下请使用 getStreamBacklogSize 监控 MQ 积压。
 	 */
 	@Override
+	@Deprecated
 	public boolean register(Object obj) {
 		try {
 			BufferMonitor bufferMonitor = (BufferMonitor)obj;
@@ -79,8 +98,10 @@ public class BufferMonitorManager implements ExpiredMsgManager {
 	/** 
 	 * @param queue
 	 * @return
+	 * @deprecated Redis 重构阶段一中降级对本地队列的监控，新架构下请使用 getStreamBacklogSize 监控 MQ 积压。
 	 */
 	@Override
+	@Deprecated
 	public boolean deregister(Object obj) {
 		try {
 			BufferMonitor bufferMonitor = (BufferMonitor)obj;

@@ -21,7 +21,7 @@ import com.king.gmms.protocol.tcp.internaltcp.CommandDeliveryReport;
 import com.king.gmms.protocol.tcp.internaltcp.CommandDeliveryReportAck;
 import com.king.gmms.protocol.tcp.internaltcp.CommandDeliveryReportQuery;
 import com.king.gmms.protocol.tcp.internaltcp.CommandDeliveryReportQueryAck;
-import com.king.gmms.protocol.tcp.internaltcp.CommandInnerAck;
+
 import com.king.gmms.protocol.tcp.internaltcp.CommandKeepAliveAck;
 import com.king.gmms.protocol.tcp.internaltcp.CommandSubmit;
 import com.king.gmms.protocol.tcp.internaltcp.CommandSubmitAck;
@@ -265,9 +265,6 @@ public class InternalAgentSession extends AbstractInternalSession{
         }
         else if (GmmsMessage.MSG_TYPE_DELIVERY_REPORT_QUERY_RESP.equalsIgnoreCase(messageType)){
         	result = sendReportQueryAck(message);
-        }
-        else if(GmmsMessage.MSG_TYPE_INNER_ACK.equalsIgnoreCase(messageType)) {
-        	result = sendInnerAck(message);
         }
         //add by kevin for REST
         else if(GmmsMessage.MSG_TYPE_DELIVERY_REPORT_QUERY.equalsIgnoreCase(messageType))
@@ -589,30 +586,6 @@ public class InternalAgentSession extends AbstractInternalSession{
         return result;
     }
     
-    private boolean sendInnerAck(GmmsMessage message) {
-        boolean result = false;
-        CommandInnerAck ack = null;
-        TcpByteBuffer responseBuffer = null;
-        try {
-            ack = new CommandInnerAck();
-            ack.convertFromMsg(message);
-            responseBuffer = ack.toByteBuffer();
-            if(log.isTraceEnabled()){
-            	log.trace(message, "Send the inner ack to CoreEngine");
-            }
-            super.submit(responseBuffer.getBuffer());
-            result = true;
-
-        }
-        catch (Exception ex) {
-        	if(log.isDebugEnabled()){
-        		log.debug(message,ex,ex);
-        	}
-            stop();
-        }
-
-        return result;
-    }
     /**
      * connection broken
      */
